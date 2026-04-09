@@ -1,0 +1,81 @@
+# ================================
+# Deployment Files (SENSITIVE)
+# ================================
+
+# .env файлы (содержат пароли)
+.env
+.env.local
+.env.*.local
+
+# Credentials файлы
+deploy-credentials.txt
+grist-client-secret.txt
+
+# Deployment output
+deploy-output.txt
+deploy-logs/
+
+# Временные файлы
+/tmp/
+*.tmp
+*.log
+
+# ================================
+# Docker & System Files
+# ================================
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# Logs
+logs/
+*.log
+
+# Temporary files
+*.swp
+*.swo
+*~
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.iml
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ================================
+# Application Data (should backup separately)
+# ================================
+
+# Grist data (large, excluded from git)
+/grist-data/
+*.grist
+
+# Keycloak data
+/keycloak-db-data/
+
+# Certificates (can regenerate with certbot)
+/letsencrypt/
+
+# ================================
+# Node modules (if needed)
+# ================================
+
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# ================================
+# Python (if using scripts)
+# ================================
+
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
