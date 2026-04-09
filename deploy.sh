@@ -23,6 +23,7 @@ OUTPUT_FILE=""
 ROLLBACK_MODE=false
 KEEP_DATA=true
 CLEAR_SSL=false
+VERBOSE=false
 
 # Конфиг
 AUTH_DOMAIN=""
@@ -62,6 +63,12 @@ log_step() {
     echo -e "\n${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo -e "${BLUE}$1${NC}" | tee -a "$LOG_FILE"
     echo -e "${BLUE}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+}
+
+log_verbose() {
+    if [[ "$VERBOSE" == true ]]; then
+        echo -e "${BLUE}[DEBUG]${NC} $1" | tee -a "$LOG_FILE"
+    fi
 }
 
 ################################################################################
@@ -152,6 +159,10 @@ parse_arguments() {
                 CLEAR_SSL=true
                 shift
                 ;;
+            --verbose)
+                VERBOSE=true
+                shift
+                ;;
             *)
                 log_error "Неизвестный параметр: $1"
                 print_usage
@@ -187,6 +198,11 @@ print_usage() {
   --keep-data                     При откатывании сохранить БД (по умолчанию)
   --delete-all                    При откатывании удалить всё (опасно!)
   --clear-ssl                     Удалить SSL сертификаты
+  --verbose                       Verbose логирование (отладка)
+
+Примеры:
+  # С verbose режимом для отладки
+  sudo ./deploy.sh --auth-domain auth.example.com ... --verbose
 
 EOF
 }
@@ -321,6 +337,11 @@ create_env_file() {
 
     local ENV_FILE="$DEPLOY_DIR/.env"
 
+    if [[ "$VERBOSE" == true ]]; then
+        log_verbose "Creating .env file at: $ENV_FILE"
+        log_verbose "File permissions will be set to 600 (root only)"
+    fi
+
     cat > "$ENV_FILE" << EOF
 # Grist + Keycloak Configuration
 # Сгенерировано: $(date)
@@ -359,6 +380,15 @@ POSTGRES_VERSION=$POSTGRES_VERSION
 EOF
 
     chmod 600 "$ENV_FILE"
+
+    if [[ "$VERBOSE" == true ]]; then
+        log_verbose ".env file created and permissions set to 600"
+        log_verbose "File contents (redacted passwords):"
+        sed 's/PASSWORD=.*/PASSWORD=***REDACTED***/g' "$ENV_FILE" | while read line; do
+            log_verbose "  $line"
+        done
+    fi
+
     log_success ".env файл создан: $ENV_FILE"
 }
 
@@ -462,20 +492,49 @@ start_containers() {
 
     cd "$DEPLOY_DIR"
 
+    if [[ "$VERBOSE" == true ]]; then
+        log_verbose "Current directory: $(pwd)"
+        log_verbose "Docker compose file: $(pwd)/docker-compose.yml"
+        log_verbose "Env file: $(pwd)/.env"
+        log_verbose "Starting containers with --env-file .env flag"
+    fi
+
     log_info "Запуск PostgreSQL и Keycloak..."
-    docker-compose up -d postgres-keycloak keycloak
+
+    if [[ "$VERBOSE" == true ]]; then
+        log_verbose "Running: docker-compose --env-file .env up -d postgres-keycloak keycloak"
+    fi
+
+    docker-compose --env-file .env up -d postgres-keycloak keycloak
+
+    if [[ "$VERBOSE" == true ]]; then
+        log_verbose "Containers started, waiting for Keycloak to be ready..."
+        log_verbose "Checking logs..."
+        docker-compose logs keycloak 2>/dev/null | tail -5 | while read line; do
+            log_verbose "  $line"
+        done
+    fi
 
     log_info "Ожидание Keycloak (максимум 5 минут)..."
     local max_attempts=60
     local attempt=0
 
     while [ $attempt -lt $max_attempts ]; do
-        if docker-compose logs keycloak 2>/dev/null | grep -q "Running the server"; then
+        if docker-compose logs keycloak 2>/dev/null | grep -q "Running the server\|started in"; then
             log_success "Keycloak готов"
+            if [[ "$VERBOSE" == true ]]; then
+                log_verbose "Keycloak startup successful after $((attempt * 5)) seconds"
+            fi
             break
         fi
 
         attempt=$((attempt + 1))
+        if [[ "$VERBOSE" == true && $((attempt % 3)) == 0 ]]; then
+            log_verbose "Attempt $attempt/60... checking logs"
+            docker-compose logs keycloak 2>/dev/null | tail -2 | while read line; do
+                log_verbose "  $line"
+            done
+        fi
         echo -ne "\r⏳ Попытка $attempt/$max_attempts..."
         sleep 5
     done
@@ -483,6 +542,12 @@ start_containers() {
     if [ $attempt -eq $max_attempts ]; then
         log_warning "Keycloak не стартовал за 5 минут"
         log_info "Проверьте логи: docker-compose logs keycloak"
+        if [[ "$VERBOSE" == true ]]; then
+            log_verbose "Full Keycloak logs:"
+            docker-compose logs keycloak | tail -50 | while read line; do
+                log_verbose "  $line"
+            done
+        fi
         read -p "Продолжить ожидание? (y/n): " -n 1 -r
         echo
         if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -492,7 +557,19 @@ start_containers() {
     fi
 
     log_info "Запуск Grist..."
-    docker-compose up -d grist
+
+    if [[ "$VERBOSE" == true ]]; then
+        log_verbose "Running: docker-compose --env-file .env up -d grist"
+    fi
+
+    docker-compose --env-file .env up -d grist
+
+    if [[ "$VERBOSE" == true ]]; then
+        log_verbose "Checking container status:"
+        docker-compose ps | while read line; do
+            log_verbose "  $line"
+        done
+    fi
 
     log_success "Все контейнеры запущены"
 }
@@ -517,25 +594,72 @@ setup_keycloak_realm() {
     export KEYCLOAK_URL="http://localhost:8090"
     export GRIST_OIDC_CLIENT_SECRET_FILE="/tmp/grist-client-secret.txt"
 
+    if [[ "$VERBOSE" == true ]]; then
+        log_verbose "Setting up Keycloak realm with these environment variables:"
+        log_verbose "  KEYCLOAK_URL: $KEYCLOAK_URL"
+        log_verbose "  KEYCLOAK_ADMIN_PASSWORD: ***REDACTED***"
+        log_verbose "  AUTH_DOMAIN: $AUTH_DOMAIN"
+        log_verbose "  GRIST_DOMAIN: $GRIST_DOMAIN"
+        log_verbose "  EMAIL_HOST: $EMAIL_HOST"
+        log_verbose "  EMAIL_PORT: $EMAIL_PORT"
+        log_verbose "  EMAIL_USER: $EMAIL_USER"
+        log_verbose "  GRIST_OIDC_CLIENT_SECRET_FILE: $GRIST_OIDC_CLIENT_SECRET_FILE"
+        log_verbose "Script location: $SCRIPT_DIR/scripts/keycloak-realm-setup.sh"
+    fi
+
     log_info "Запуск скрипта настройки Keycloak..."
 
     # Запустить keycloak-realm-setup.sh
     if bash "$SCRIPT_DIR/scripts/keycloak-realm-setup.sh"; then
+        if [[ "$VERBOSE" == true ]]; then
+            log_verbose "Keycloak realm setup script completed successfully"
+        fi
         log_success "Keycloak realm и OIDC client созданы"
 
         # Получить client secret из файла
         if [[ -f "$GRIST_OIDC_CLIENT_SECRET_FILE" ]]; then
             GRIST_OIDC_CLIENT_SECRET=$(cat "$GRIST_OIDC_CLIENT_SECRET_FILE")
+
+            if [[ "$VERBOSE" == true ]]; then
+                log_verbose "Client secret file found and read"
+                log_verbose "Client secret (first 20 chars): ${GRIST_OIDC_CLIENT_SECRET:0:20}..."
+            fi
+
             log_success "Client secret получен"
 
             # Обновить .env файл
             log_info "Обновление .env файла..."
+
+            if [[ "$VERBOSE" == true ]]; then
+                log_verbose "Before update, GRIST_OIDC_CLIENT_SECRET in .env:"
+                grep GRIST_OIDC_CLIENT_SECRET "$DEPLOY_DIR/.env" | head -c 100 | while read line; do
+                    log_verbose "  $line..."
+                done
+            fi
+
             sed -i "s/^GRIST_OIDC_CLIENT_SECRET=.*/GRIST_OIDC_CLIENT_SECRET=$GRIST_OIDC_CLIENT_SECRET/" "$DEPLOY_DIR/.env"
+
+            if [[ "$VERBOSE" == true ]]; then
+                log_verbose "After update, GRIST_OIDC_CLIENT_SECRET in .env:"
+                grep GRIST_OIDC_CLIENT_SECRET "$DEPLOY_DIR/.env" | head -c 100 | while read line; do
+                    log_verbose "  $line..."
+                done
+            fi
 
             # Пересоздать Grist контейнер с новым secret
             log_info "Перезагрузка Grist с новой конфигурацией OIDC..."
-            docker-compose down grist
-            docker-compose up -d grist
+
+            if [[ "$VERBOSE" == true ]]; then
+                log_verbose "Running: docker-compose down grist"
+            fi
+
+            docker-compose --env-file .env down grist
+
+            if [[ "$VERBOSE" == true ]]; then
+                log_verbose "Running: docker-compose --env-file .env up -d grist"
+            fi
+
+            docker-compose --env-file .env up -d grist
 
             log_info "Ожидание Grist (максимум 2 минуты)..."
             local max_attempts=24
@@ -544,18 +668,33 @@ setup_keycloak_realm() {
             while [ $attempt -lt $max_attempts ]; do
                 if curl -s http://localhost:3000 > /dev/null 2>&1; then
                     log_success "Grist готов"
+                    if [[ "$VERBOSE" == true ]]; then
+                        log_verbose "Grist is responding after $((attempt * 5)) seconds"
+                    fi
                     break
                 fi
                 attempt=$((attempt + 1))
+                if [[ "$VERBOSE" == true && $((attempt % 2)) == 0 ]]; then
+                    log_verbose "Attempt $attempt/24... checking Grist status"
+                fi
                 echo -ne "\r⏳ Попытка $attempt/$max_attempts..."
                 sleep 5
             done
 
             if [ $attempt -eq $max_attempts ]; then
                 log_warning "Grist может не запуститься сразу, проверьте логи: docker-compose logs grist"
+                if [[ "$VERBOSE" == true ]]; then
+                    log_verbose "Grist startup timeout, showing last 20 lines of logs:"
+                    docker-compose logs grist | tail -20 | while read line; do
+                        log_verbose "  $line"
+                    done
+                fi
             fi
 
             # Очистить временный файл
+            if [[ "$VERBOSE" == true ]]; then
+                log_verbose "Removing temporary client secret file: $GRIST_OIDC_CLIENT_SECRET_FILE"
+            fi
             rm -f "$GRIST_OIDC_CLIENT_SECRET_FILE"
         else
             log_error "Не удалось получить client secret"
@@ -773,8 +912,27 @@ main() {
     log_step "Grist + Keycloak Deployment Script"
     log_info "Дата: $(date)"
 
+    if [[ "$VERBOSE" == true ]]; then
+        log_verbose "Verbose mode enabled"
+        log_verbose "Script directory: $SCRIPT_DIR"
+        log_verbose "Deploy directory: $DEPLOY_DIR"
+        log_verbose "Log file: $LOG_FILE"
+    fi
+
     # Обработка аргументов
     parse_arguments "$@"
+
+    if [[ "$VERBOSE" == true ]]; then
+        log_verbose "Parsed arguments:"
+        log_verbose "  AUTH_DOMAIN: $AUTH_DOMAIN"
+        log_verbose "  GRIST_DOMAIN: $GRIST_DOMAIN"
+        log_verbose "  EMAIL_USER: $EMAIL_USER"
+        log_verbose "  EMAIL_HOST: $EMAIL_HOST"
+        log_verbose "  GRIST_ADMIN_EMAIL: $GRIST_ADMIN_EMAIL"
+        log_verbose "  CERTBOT_EMAIL: $CERTBOT_EMAIL"
+        log_verbose "  ROLLBACK_MODE: $ROLLBACK_MODE"
+        log_verbose "  KEEP_DATA: $KEEP_DATA"
+    fi
 
     # Проверка requirements
     check_requirements
