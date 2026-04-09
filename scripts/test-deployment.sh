@@ -252,24 +252,13 @@ print_summary() {
     echo -e "${RED}Не пройдено: $TESTS_FAILED${NC}"
     echo -e "Успешность: ${BLUE}${percent}%${NC}"
 
-    # Exit with proper code
     if [ $TESTS_FAILED -eq 0 ]; then
         echo -e "\n${GREEN}✅ Все тесты пройдены успешно!${NC}"
         return 0
-    else
-        echo -e "\n${YELLOW}⚠️  Некоторые тесты не пройдены, но развертывание может работать${NC}"
-        return 0  # Still return 0 because some failures are expected in test environment
     fi
-    echo -e "Всего: $total"
-    echo -e "Успешность: ${percent}%"
 
-    if [[ $TESTS_FAILED -eq 0 ]]; then
-        echo -e "\n${GREEN}✅ Все тесты пройдены!${NC}"
-        return 0
-    else
-        echo -e "\n${RED}❌ Некоторые тесты не пройдены${NC}"
-        return 1
-    fi
+    echo -e "\n${YELLOW}⚠️  Некоторые тесты не пройдены (часто из‑за nginx/HTTPS — см. deploy.sh и документацию).${NC}"
+    return 1
 }
 
 ################################################################################

@@ -807,7 +807,8 @@ run_tests() {
     if bash "$SCRIPT_DIR/scripts/test-deployment.sh"; then
         log_success "Все тесты пройдены"
     else
-        log_warning "Некоторые тесты могут не пройти, но развертывание продолжено"
+        log_warning "Часть тестов не прошла (часто HTTP 404 по HTTPS, пока не настроен nginx перед контейнерами)."
+        log_info "Сервисы в Docker: Keycloak http://127.0.0.1:8090, Grist http://127.0.0.1:3000 — для https://$AUTH_DOMAIN и https://$GRIST_DOMAIN нужен reverse proxy (nginx) и SSL."
     fi
 }
 
