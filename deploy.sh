@@ -298,8 +298,49 @@ validate_input() {
 # Генерация паролей и конфигурации
 ################################################################################
 
+# Прочитать значение из .env (одна строка KEY=value..., значение может содержать '=')
+read_env_var() {
+    local key="$1"
+    local file="$2"
+    local line
+    line=$(grep "^${key}=" "$file" 2>/dev/null | head -1) || true
+    if [[ -n "$line" ]]; then
+        echo "${line#"${key}="}"
+    fi
+}
+
 generate_secrets() {
     log_step "Генерация секретов и паролей"
+
+    local ENV_FILE="$DEPLOY_DIR/.env"
+    local existing_pg_volume=false
+    if docker volume ls -q 2>/dev/null | grep -q 'keycloak-db-data'; then
+        existing_pg_volume=true
+    fi
+
+    # PostgreSQL хранит пароль только при первом init тома; при повторном запуске скрипта
+    # нельзя генерировать новый POSTGRES_KEYCLOAK_PASSWORD, если данные БД уже есть.
+    if [[ -f "$ENV_FILE" ]] && [[ "$KEEP_DATA" == true ]]; then
+        log_info "Загрузка секретов из $ENV_FILE (совпадает с уже инициализированной БД в Docker volume)"
+        KEYCLOAK_ADMIN_PASSWORD=$(read_env_var KEYCLOAK_ADMIN_PASSWORD "$ENV_FILE")
+        POSTGRES_KEYCLOAK_PASSWORD=$(read_env_var POSTGRES_KEYCLOAK_PASSWORD "$ENV_FILE")
+        GRIST_OIDC_CLIENT_SECRET=$(read_env_var GRIST_OIDC_CLIENT_SECRET "$ENV_FILE")
+        GRIST_API_KEY=$(read_env_var GRIST_API_KEY "$ENV_FILE")
+        if [[ -z "$POSTGRES_KEYCLOAK_PASSWORD" ]]; then
+            log_error "В $ENV_FILE нет POSTGRES_KEYCLOAK_PASSWORD, а файл существует. Исправьте .env или удалите том БД."
+            exit 1
+        fi
+        log_success "Секреты загружены из существующего .env"
+        return
+    fi
+
+    if [[ "$existing_pg_volume" == true ]] && [[ "$KEEP_DATA" == true ]]; then
+        log_error "Найден Docker volume с данными PostgreSQL (keycloak-db-data), но нет $ENV_FILE с паролем БД."
+        log_error "Keycloak не сможет подключиться: пароль в БД не совпадёт с новым."
+        log_info "Варианты: (1) восстановите .env из бэкапа; (2) удалите том и разверните заново:"
+        log_info "  cd $DEPLOY_DIR && docker compose --env-file .env down 2>/dev/null; docker volume rm \$(docker volume ls -q | grep keycloak-db-data)"
+        exit 1
+    fi
 
     KEYCLOAK_ADMIN_PASSWORD=$(openssl rand -base64 32)
     POSTGRES_KEYCLOAK_PASSWORD=$(openssl rand -base64 32)
@@ -947,9 +988,9 @@ main() {
     interactive_input
     validate_input
 
-    # Генерация и создание конфиг файлов
-    generate_secrets
+    # Подготовка каталога до загрузки/генерации секретов (нужен путь к .env)
     setup_directories
+    generate_secrets
     create_env_file
     create_docker_compose
 
