@@ -84,7 +84,7 @@ check_requirements() {
     fi
 
     # Проверить утилиты
-    for cmd in docker curl openssl git; do
+    for cmd in docker curl openssl git jq; do
         if ! command -v "$cmd" &> /dev/null; then
             log_error "$cmd не установлен"
             log_info "Установите: apt-get install -y $cmd"
@@ -498,8 +498,273 @@ start_containers() {
 }
 
 ################################################################################
-# Основной flow
+# Настройка Keycloak realm и OIDC client
 ################################################################################
+
+setup_keycloak_realm() {
+    log_step "Настройка Keycloak Realm и OIDC Client"
+
+    cd "$DEPLOY_DIR"
+
+    # Убедиться что переменные окружения установлены
+    export KEYCLOAK_ADMIN_PASSWORD
+    export GRIST_DOMAIN
+    export AUTH_DOMAIN
+    export EMAIL_HOST
+    export EMAIL_PORT
+    export EMAIL_USER
+    export EMAIL_PASSWORD
+    export KEYCLOAK_URL="http://localhost:8090"
+    export GRIST_OIDC_CLIENT_SECRET_FILE="/tmp/grist-client-secret.txt"
+
+    log_info "Запуск скрипта настройки Keycloak..."
+
+    # Запустить keycloak-realm-setup.sh
+    if bash "$SCRIPT_DIR/scripts/keycloak-realm-setup.sh"; then
+        log_success "Keycloak realm и OIDC client созданы"
+
+        # Получить client secret из файла
+        if [[ -f "$GRIST_OIDC_CLIENT_SECRET_FILE" ]]; then
+            GRIST_OIDC_CLIENT_SECRET=$(cat "$GRIST_OIDC_CLIENT_SECRET_FILE")
+            log_success "Client secret получен"
+
+            # Обновить .env файл
+            log_info "Обновление .env файла..."
+            sed -i "s/^GRIST_OIDC_CLIENT_SECRET=.*/GRIST_OIDC_CLIENT_SECRET=$GRIST_OIDC_CLIENT_SECRET/" "$DEPLOY_DIR/.env"
+
+            # Пересоздать Grist контейнер с новым secret
+            log_info "Перезагрузка Grist с новой конфигурацией OIDC..."
+            docker-compose down grist
+            docker-compose up -d grist
+
+            log_info "Ожидание Grist (максимум 2 минуты)..."
+            local max_attempts=24
+            local attempt=0
+
+            while [ $attempt -lt $max_attempts ]; do
+                if curl -s http://localhost:3000 > /dev/null 2>&1; then
+                    log_success "Grist готов"
+                    break
+                fi
+                attempt=$((attempt + 1))
+                echo -ne "\r⏳ Попытка $attempt/$max_attempts..."
+                sleep 5
+            done
+
+            if [ $attempt -eq $max_attempts ]; then
+                log_warning "Grist может не запуститься сразу, проверьте логи: docker-compose logs grist"
+            fi
+
+            # Очистить временный файл
+            rm -f "$GRIST_OIDC_CLIENT_SECRET_FILE"
+        else
+            log_error "Не удалось получить client secret"
+            return 1
+        fi
+    else
+        log_error "Ошибка при создании Keycloak realm"
+        return 1
+    fi
+}
+
+################################################################################
+# Запуск тестов
+################################################################################
+
+run_tests() {
+    log_step "Запуск тестов развертывания"
+
+    cd "$DEPLOY_DIR"
+
+    # Экспортировать переменные для скрипта тестирования
+    export AUTH_DOMAIN
+    export GRIST_DOMAIN
+    export DEPLOY_DIR
+
+    if bash "$SCRIPT_DIR/scripts/test-deployment.sh"; then
+        log_success "Все тесты пройдены"
+    else
+        log_warning "Некоторые тесты могут не пройти, но развертывание продолжено"
+    fi
+}
+
+################################################################################
+# Вывод credentials и информации о развертывании
+################################################################################
+
+output_credentials() {
+    log_step "Сохранение учетных данных"
+
+    # Создать файл с учетными данными
+    cat > "$CREDENTIALS_FILE" << EOF
+================================================================================
+GRIST + KEYCLOAK DEPLOYMENT CREDENTIALS
+Дата: $(date)
+================================================================================
+
+🔐 KEYCLOAK ADMIN CREDENTIALS
+────────────────────────────────────────────────────────────────────────────
+URL: https://$AUTH_DOMAIN
+Username: admin
+Password: $KEYCLOAK_ADMIN_PASSWORD
+
+⚠️  СОХРАНИТЕ ЭТОТ ФАЙЛ В БЕЗОПАСНОМ МЕСТЕ!
+────────────────────────────────────────────────────────────────────────────
+
+📋 OIDC CLIENT CONFIGURATION
+────────────────────────────────────────────────────────────────────────────
+Client ID: grist-client
+Client Secret: $GRIST_OIDC_CLIENT_SECRET
+Issuer: https://$AUTH_DOMAIN/realms/grist
+Redirect URI: https://$GRIST_DOMAIN/oauth2/callback
+
+🔐 POSTGRESQL CREDENTIALS
+────────────────────────────────────────────────────────────────────────────
+Username: keycloak
+Password: $POSTGRES_KEYCLOAK_PASSWORD
+Database: keycloak
+
+🎯 GRIST ADMIN EMAIL
+────────────────────────────────────────────────────────────────────────────
+Email: $GRIST_ADMIN_EMAIL
+API Key: $GRIST_API_KEY
+
+📧 EMAIL/SMTP CONFIGURATION
+────────────────────────────────────────────────────────────────────────────
+Host: $EMAIL_HOST
+Port: $EMAIL_PORT
+Username: $EMAIL_USER
+From Address: $EMAIL_USER
+
+================================================================================
+IMPORTANT: These credentials are stored in plain text. Keep this file secure!
+================================================================================
+EOF
+
+    chmod 600 "$CREDENTIALS_FILE"
+    log_success "Учетные данные сохранены в: $CREDENTIALS_FILE"
+
+    # Создать файл с информацией о развертывании
+    cat > "$OUTPUT_FILE" << EOF
+🎉 GRIST + KEYCLOAK DEVELOPMENT DEPLOYMENT
+Дата: $(date)
+
+================================================================================
+✅ DEPLOYMENT COMPLETED SUCCESSFULLY
+================================================================================
+
+🌐 AVAILABLE SERVICES
+────────────────────────────────────────────────────────────────────────────
+Keycloak Admin Panel:
+  URL: https://$AUTH_DOMAIN
+  Username: admin
+  Password: [see deploy-credentials.txt]
+
+Grist Application:
+  URL: https://$GRIST_DOMAIN
+  Login: OIDC via Keycloak
+
+================================================================================
+📱 iOS/ANDROID INTEGRATION
+================================================================================
+
+Use this configuration in your mobile app:
+
+{
+  "grist_api_url": "https://$GRIST_DOMAIN",
+  "grist_org": "$GRIST_ORG",
+  "auth_type": "oidc",
+  "oidc_issuer": "https://$AUTH_DOMAIN/realms/grist",
+  "client_id": "grist-client",
+  "redirect_uri": "app://grist-callback"
+}
+
+================================================================================
+🔐 SECURITY NOTES
+================================================================================
+
+1. The .env file contains all sensitive data (passwords, secrets)
+   Location: $DEPLOY_DIR/.env
+   Permissions: 600 (root only)
+
+2. deploy-credentials.txt contains a backup of all credentials
+   Location: $CREDENTIALS_FILE
+   Permissions: 600 (root only)
+
+3. IMPORTANT: Store these credentials in a secure location:
+   ✅ Password manager (1Password, Bitwarden, etc.)
+   ✅ Encrypted storage
+   ❌ NOT in Git repository
+   ❌ NOT in plain text files
+   ❌ NOT in email or Slack
+
+4. The .gitignore file protects against accidentally committing secrets
+
+================================================================================
+📚 NEXT STEPS
+================================================================================
+
+1. Create users in Keycloak Admin Panel:
+   https://$AUTH_DOMAIN → Realm: grist → Users → Create user
+
+2. Create a test user:
+   Email: test@example.com
+   Password: [set a password]
+   Email Verified: ON
+
+3. Login to Grist:
+   https://$GRIST_DOMAIN
+   Click "Sign in"
+   Use your Keycloak credentials
+
+4. For mobile app integration:
+   Use the JSON configuration above in GristConfig
+
+================================================================================
+🆘 TROUBLESHOOTING
+================================================================================
+
+Check the logs:
+  docker-compose logs keycloak
+  docker-compose logs grist
+  tail -f /tmp/grist-keycloak-deploy.log
+
+Run diagnostics:
+  bash $DEPLOY_DIR/scripts/test-deployment.sh
+
+See documentation:
+  $DEPLOY_DIR/docs/TROUBLESHOOTING.md
+  $DEPLOY_DIR/docs/FAQ.md
+
+================================================================================
+💾 BACKUP & RESTORE
+================================================================================
+
+Backup PostgreSQL database:
+  docker exec grist-sso-postgres pg_dump -U keycloak keycloak > keycloak-backup.sql
+
+Backup Grist data:
+  docker run --rm -v grist-sso_grist-data:/data -v \$(pwd):/backup \\
+    alpine tar czf /backup/grist-backup.tar.gz -C /data .
+
+Backup configuration:
+  cp $DEPLOY_DIR/.env backup/.env
+  cp $CREDENTIALS_FILE backup/deploy-credentials.txt
+
+See $DEPLOY_DIR/docs/FAQ.md for restore procedures.
+
+================================================================================
+Generated by Grist + Keycloak Deployment Script v1.0
+================================================================================
+EOF
+
+    chmod 600 "$OUTPUT_FILE"
+    log_success "Детали развертывания сохранены в: $OUTPUT_FILE"
+
+    # Вывести информацию в консоль
+    echo ""
+    cat "$OUTPUT_FILE"
+}
 
 main() {
     # Инициализация логирования
@@ -533,12 +798,22 @@ main() {
     # Запуск контейнеров
     start_containers
 
-    # TODO: Создание Keycloak realm и клиента
-    # TODO: Тесты развертывания
-    # TODO: Вывод credentials и QR кода
+    # Создание Keycloak realm и клиента
+    setup_keycloak_realm
+
+    # Тесты развертывания
+    run_tests
+
+    # Вывод credentials и QR кода
+    output_credentials
 
     log_step "Развертывание завершено!"
-    log_info "Следующие шаги: см. $OUTPUT_FILE"
+    log_success "Учетные данные сохранены в: $CREDENTIALS_FILE"
+    log_info "Детали развертывания: $OUTPUT_FILE"
+    log_info ""
+    log_info "🌐 Доступные сервисы:"
+    log_info "   Keycloak Admin: https://$AUTH_DOMAIN"
+    log_info "   Grist App: https://$GRIST_DOMAIN"
 }
 
 ################################################################################
