@@ -35,6 +35,10 @@ log_success() {
     echo -e "${GREEN}✅${NC} $1" >&2
 }
 
+log_warning() {
+    echo -e "${YELLOW}⚠${NC}  $1" >&2
+}
+
 log_error() {
     echo -e "${RED}❌${NC} $1" >&2
     exit 1
@@ -69,12 +73,64 @@ get_admin_token() {
 # Создание realm
 ################################################################################
 
+# SMTP отдельным PUT: встроенный smtpServer в POST иногда даёт 400 без поля .error,
+# скрипт ошибочно считал успех; плюс jq безопасно кодирует пароль.
+update_realm_smtp() {
+    local token="$1"
+    log_info "Настройка SMTP для realm 'grist'..."
+
+    local realm_json merged put_tmp http_code put_body
+    realm_json=$(curl -s -H "Authorization: Bearer $token" "$KEYCLOAK_URL/admin/realms/grist")
+    if [[ -z "$realm_json" ]] || ! echo "$realm_json" | jq -e . >/dev/null 2>&1; then
+        log_warning "Не удалось прочитать realm для SMTP (пропуск)"
+        return 0
+    fi
+
+    local port_num="${EMAIL_PORT:-587}"
+    [[ "$port_num" =~ ^[0-9]+$ ]] || port_num=587
+
+    merged=$(echo "$realm_json" | jq \
+        --arg h "$EMAIL_HOST" \
+        --argjson p "$port_num" \
+        --arg u "$EMAIL_USER" \
+        --arg pw "$EMAIL_PASSWORD" \
+        '.smtpServer = {
+            host: $h,
+            port: $p,
+            auth: true,
+            starttls: true,
+            user: $u,
+            password: $pw,
+            from: $u
+        }') || {
+        log_warning "Не удалось собрать JSON SMTP (jq). Настройте SMTP вручную в админке Keycloak."
+        return 0
+    }
+
+    put_tmp=$(mktemp)
+    http_code=$(curl -sS -o "$put_tmp" -w "%{http_code}" -X PUT \
+        "$KEYCLOAK_URL/admin/realms/grist" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json" \
+        -d "$merged")
+    put_body=$(cat "$put_tmp")
+    rm -f "$put_tmp"
+
+    if [[ "$http_code" == "204" ]] || [[ "$http_code" == "200" ]]; then
+        log_success "SMTP для realm 'grist' настроен"
+    else
+        log_warning "SMTP не применён (HTTP $http_code). Настройте вручную: Realm grist → Realm settings → Email. Ответ: $put_body"
+    fi
+}
+
 create_realm() {
     local token="$1"
 
-    log_info "Создание realm 'grist'..."
+    log_info "Создание realm 'grist' (без SMTP в POST — он добавляется отдельно)..."
 
-    local response=$(curl -s -X POST \
+    local tmp http_code response err_txt verify
+    tmp=$(mktemp)
+    http_code=$(curl -sS -o "$tmp" -w "%{http_code}" -X POST \
         "$KEYCLOAK_URL/admin/realms" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json" \
@@ -86,29 +142,27 @@ create_realm() {
             "emailTheme": "keycloak",
             "accessTokenLifespan": 3600,
             "refreshTokenLifespan": 604800,
-            "offlineSessionIdleTimeout": 2592000,
-            "smtpServer": {
-                "host": "'$EMAIL_HOST'",
-                "port": '$EMAIL_PORT',
-                "auth": true,
-                "starttls": true,
-                "user": "'$EMAIL_USER'",
-                "password": "'$EMAIL_PASSWORD'",
-                "from": "'$EMAIL_USER'"
-            }
+            "offlineSessionIdleTimeout": 2592000
         }')
+    response=$(cat "$tmp")
+    rm -f "$tmp"
 
-    # Проверить наличие ошибки
-    if echo "$response" | jq -e '.error' > /dev/null 2>&1; then
-        local error=$(echo "$response" | jq -r '.error_description // .error')
-        if [[ "$error" == *"Realm already exists"* ]]; then
-            log_info "Realm 'grist' уже существует"
-        else
-            log_error "Ошибка при создании realm: $error"
-        fi
+    if [[ "$http_code" == "201" ]] || [[ "$http_code" == "204" ]]; then
+        log_success "Realm 'grist' создан (HTTP $http_code)"
+    elif [[ "$http_code" == "409" ]] || echo "$response" | grep -qi 'exists\|Conflict'; then
+        log_info "Realm 'grist' уже существует (HTTP $http_code)"
     else
-        log_success "Realm 'grist' создан"
+        err_txt=$(echo "$response" | jq -r '.error_description // .errorMessage // .error // empty' 2>/dev/null || true)
+        echo "Ответ Keycloak при создании realm (HTTP $http_code): $response" >&2
+        log_error "Ошибка при создании realm: ${err_txt:-HTTP $http_code}"
     fi
+
+    verify=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $token" "$KEYCLOAK_URL/admin/realms/grist")
+    if [[ "$verify" != "200" ]]; then
+        log_error "Realm 'grist' недоступен после POST (GET → HTTP $verify). Проверьте логи Keycloak."
+    fi
+
+    update_realm_smtp "$token"
 }
 
 ################################################################################
