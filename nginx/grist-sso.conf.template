@@ -1,0 +1,75 @@
+# Grist + Keycloak — reverse proxy (генерируется setup-nginx.sh)
+# Keycloak: __AUTH_DOMAIN__ → 127.0.0.1:8090
+# Grist:     __GRIST_DOMAIN__ → 127.0.0.1:3000
+
+# --- Keycloak (auth) ---
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __AUTH_DOMAIN__;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name __AUTH_DOMAIN__;
+
+    ssl_certificate     __SSL_CERT_AUTH__;
+    ssl_certificate_key __SSL_KEY_AUTH__;
+
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:MozSSL:10m;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    client_max_body_size 50m;
+
+    location / {
+        proxy_pass http://127.0.0.1:8090;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-Port $server_port;
+        proxy_buffer_size 128k;
+        proxy_buffers 4 256k;
+        proxy_busy_buffers_size 256k;
+    }
+}
+
+# --- Grist ---
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __GRIST_DOMAIN__;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name __GRIST_DOMAIN__;
+
+    ssl_certificate     __SSL_CERT_GRIST__;
+    ssl_certificate_key __SSL_KEY_GRIST__;
+
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:MozSSL:10m;
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    client_max_body_size 100m;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}

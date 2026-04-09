@@ -25,6 +25,7 @@ KEEP_DATA=true
 CLEAR_SSL=false
 VERBOSE=false
 RESET_POSTGRES_VOLUME=false
+SETUP_NGINX=false
 
 # Конфиг
 AUTH_DOMAIN=""
@@ -168,6 +169,10 @@ parse_arguments() {
                 RESET_POSTGRES_VOLUME=true
                 shift
                 ;;
+            --setup-nginx)
+                SETUP_NGINX=true
+                shift
+                ;;
             *)
                 log_error "Неизвестный параметр: $1"
                 print_usage
@@ -207,6 +212,8 @@ print_usage() {
   --reset-postgres-volume         Удалить Docker-том БД Keycloak перед деплоем (после
                                   смены пароля в .env без совпадения с данными в томе;
                                   данные realm в Postgres будут потеряны)
+  --setup-nginx                   После деплоя установить конфиг nginx (нужны
+                                  сертификаты certbot для AUTH_DOMAIN и GRIST_DOMAIN)
 
 Примеры:
   # С verbose режимом для отладки
@@ -791,6 +798,30 @@ setup_keycloak_realm() {
 }
 
 ################################################################################
+# nginx reverse proxy (HTTPS → Keycloak / Grist)
+################################################################################
+
+run_nginx_setup() {
+    log_step "Настройка nginx reverse proxy"
+
+    if [[ ! -f "$SCRIPT_DIR/scripts/setup-nginx.sh" ]]; then
+        log_error "Не найден: $SCRIPT_DIR/scripts/setup-nginx.sh"
+        return 1
+    fi
+
+    chmod +x "$SCRIPT_DIR/scripts/setup-nginx.sh" 2>/dev/null || true
+    if DEPLOY_DIR="$DEPLOY_DIR" bash "$SCRIPT_DIR/scripts/setup-nginx.sh"; then
+        log_success "nginx настроен: https://$AUTH_DOMAIN и https://$GRIST_DOMAIN"
+    else
+        log_warning "nginx не настроен. Нужны сертификаты Let's Encrypt:"
+        log_info "  certbot certonly --nginx -d $AUTH_DOMAIN"
+        log_info "  certbot certonly --nginx -d $GRIST_DOMAIN"
+        log_info "Затем: sudo DEPLOY_DIR=$DEPLOY_DIR $SCRIPT_DIR/scripts/setup-nginx.sh"
+        return 1
+    fi
+}
+
+################################################################################
 # Запуск тестов
 ################################################################################
 
@@ -1018,6 +1049,7 @@ main() {
         log_verbose "  ROLLBACK_MODE: $ROLLBACK_MODE"
         log_verbose "  KEEP_DATA: $KEEP_DATA"
         log_verbose "  RESET_POSTGRES_VOLUME: $RESET_POSTGRES_VOLUME"
+        log_verbose "  SETUP_NGINX: $SETUP_NGINX"
     fi
 
     # Проверка requirements
@@ -1054,6 +1086,10 @@ main() {
 
     # Вывод credentials и QR кода
     output_credentials
+
+    if [[ "$SETUP_NGINX" == true ]]; then
+        run_nginx_setup || true
+    fi
 
     log_step "Развертывание завершено!"
     log_success "Учетные данные сохранены в: $CREDENTIALS_FILE"
