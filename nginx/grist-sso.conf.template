@@ -11,8 +11,9 @@ server {
 }
 
 server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
+    # без http2 в listen — иначе nginx 1.24 часто пишет «protocol options redefined» при двух server {} на 443
+    listen 443 ssl;
+    listen [::]:443 ssl;
     server_name __AUTH_DOMAIN__;
 
     ssl_certificate     __SSL_CERT_AUTH__;
@@ -45,8 +46,8 @@ server {
 }
 
 server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
+    listen 443 ssl;
+    listen [::]:443 ssl;
     server_name __GRIST_DOMAIN__;
 
     ssl_certificate     __SSL_CERT_GRIST__;
