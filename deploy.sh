@@ -24,6 +24,7 @@ ROLLBACK_MODE=false
 KEEP_DATA=true
 CLEAR_SSL=false
 VERBOSE=false
+RESET_POSTGRES_VOLUME=false
 
 # Конфиг
 AUTH_DOMAIN=""
@@ -163,6 +164,10 @@ parse_arguments() {
                 VERBOSE=true
                 shift
                 ;;
+            --reset-postgres-volume)
+                RESET_POSTGRES_VOLUME=true
+                shift
+                ;;
             *)
                 log_error "Неизвестный параметр: $1"
                 print_usage
@@ -199,6 +204,9 @@ print_usage() {
   --delete-all                    При откатывании удалить всё (опасно!)
   --clear-ssl                     Удалить SSL сертификаты
   --verbose                       Verbose логирование (отладка)
+  --reset-postgres-volume         Удалить Docker-том БД Keycloak перед деплоем (после
+                                  смены пароля в .env без совпадения с данными в томе;
+                                  данные realm в Postgres будут потеряны)
 
 Примеры:
   # С verbose режимом для отладки
@@ -321,7 +329,8 @@ generate_secrets() {
     # PostgreSQL хранит пароль только при первом init тома; при повторном запуске скрипта
     # нельзя генерировать новый POSTGRES_KEYCLOAK_PASSWORD, если данные БД уже есть.
     if [[ -f "$ENV_FILE" ]] && [[ "$KEEP_DATA" == true ]]; then
-        log_info "Загрузка секретов из $ENV_FILE (совпадает с уже инициализированной БД в Docker volume)"
+        log_info "Загрузка секретов из $ENV_FILE (без перегенерации при KEEP_DATA)"
+        log_info "Если Keycloak пишет «password authentication failed», пароль в .env не совпадает с тем, что был при первом init тома PostgreSQL — удалите том или запустите с --reset-postgres-volume"
         KEYCLOAK_ADMIN_PASSWORD=$(read_env_var KEYCLOAK_ADMIN_PASSWORD "$ENV_FILE")
         POSTGRES_KEYCLOAK_PASSWORD=$(read_env_var POSTGRES_KEYCLOAK_PASSWORD "$ENV_FILE")
         GRIST_OIDC_CLIENT_SECRET=$(read_env_var GRIST_OIDC_CLIENT_SECRET "$ENV_FILE")
@@ -525,6 +534,38 @@ EOF
 }
 
 ################################################################################
+# Сброс тома PostgreSQL (Keycloak)
+################################################################################
+
+reset_keycloak_postgres_volume() {
+    log_step "Сброс тома PostgreSQL (Keycloak)"
+
+    cd "$DEPLOY_DIR" || exit 1
+    if [[ -f docker-compose.yml ]]; then
+        log_info "Остановка контейнеров..."
+        docker-compose --env-file .env down 2>/dev/null || docker-compose down 2>/dev/null || true
+    fi
+
+    local vols
+    vols=$(docker volume ls -q 2>/dev/null | grep 'keycloak-db-data' || true)
+    if [[ -z "$vols" ]]; then
+        log_info "Том *keycloak-db-data не найден — удалять нечего."
+        return 0
+    fi
+
+    while IFS= read -r vol; do
+        [[ -z "$vol" ]] && continue
+        log_warning "Удаление тома: $vol"
+        if ! docker volume rm "$vol" 2>/dev/null; then
+            log_error "Не удалось удалить $vol — остановите контейнеры: docker-compose --env-file .env down"
+            exit 1
+        fi
+    done <<< "$vols"
+
+    log_success "Том PostgreSQL для Keycloak удалён. При следующем запуске БД создастся заново с паролем из .env."
+}
+
+################################################################################
 # Запуск контейнеров
 ################################################################################
 
@@ -589,12 +630,14 @@ start_containers() {
                 log_verbose "  $line"
             done
         fi
-        read -p "Продолжить ожидание? (y/n): " -n 1 -r
-        echo
-        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-            log_error "Развертывание отменено"
-            exit 1
+        if docker-compose logs keycloak 2>/dev/null | grep -q 'password authentication failed'; then
+            log_error "PostgreSQL отклоняет пароль пользователя keycloak: пароль в .env не совпадает с тем, что был при первом init тома."
+            log_info "Повторите деплой с удалением тома и тем же .env (данные БД Keycloak будут сброшены):"
+            log_info "  sudo $SCRIPT_DIR/deploy.sh ... --reset-postgres-volume"
+            log_info "или вручную: cd $DEPLOY_DIR && docker-compose --env-file .env down && docker volume rm \$(docker volume ls -q | grep keycloak-db-data)"
         fi
+        log_error "Развертывание прервано: Keycloak не готов"
+        exit 1
     fi
 
     log_info "Запуск Grist..."
@@ -973,6 +1016,7 @@ main() {
         log_verbose "  CERTBOT_EMAIL: $CERTBOT_EMAIL"
         log_verbose "  ROLLBACK_MODE: $ROLLBACK_MODE"
         log_verbose "  KEEP_DATA: $KEEP_DATA"
+        log_verbose "  RESET_POSTGRES_VOLUME: $RESET_POSTGRES_VOLUME"
     fi
 
     # Проверка requirements
@@ -993,6 +1037,10 @@ main() {
     generate_secrets
     create_env_file
     create_docker_compose
+
+    if [[ "$RESET_POSTGRES_VOLUME" == true ]]; then
+        reset_keycloak_postgres_volume
+    fi
 
     # Запуск контейнеров
     start_containers
