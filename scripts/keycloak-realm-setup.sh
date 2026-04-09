@@ -120,14 +120,19 @@ create_oidc_client() {
 
     log_info "Создание OIDC client 'grist-client'..."
 
-    local response=$(curl -s -X POST \
+    # ClientRepresentation: поле publicClient, не "public"; protocol — openid-connect
+    local tmp http_code response client_id err_txt
+    tmp=$(mktemp)
+    http_code=$(curl -sS -o "$tmp" -w "%{http_code}" -X POST \
         "$KEYCLOAK_URL/admin/realms/grist/clients" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json" \
         -d '{
             "clientId": "grist-client",
+            "protocol": "openid-connect",
             "enabled": true,
-            "public": false,
+            "publicClient": false,
+            "bearerOnly": false,
             "standardFlowEnabled": true,
             "directAccessGrantsEnabled": true,
             "serviceAccountsEnabled": false,
@@ -141,31 +146,35 @@ create_oidc_client() {
             "rootUrl": "https://'$GRIST_DOMAIN'",
             "baseUrl": "https://'$GRIST_DOMAIN'"
         }')
+    response=$(cat "$tmp")
+    rm -f "$tmp"
 
-    # Проверить что ответ содержит ID клиента
-    local client_id=$(echo "$response" | jq -r '.id // empty')
+    client_id=$(echo "$response" | jq -r '.id // empty')
 
-    if [[ -z "$client_id" ]]; then
-        # Может быть ошибка что клиент уже существует
-        if echo "$response" | jq -e '.error' > /dev/null 2>&1; then
-            local error=$(echo "$response" | jq -r '.error_description // .error')
-            if [[ "$error" == *"already exists"* ]]; then
-                log_info "OIDC client 'grist-client' уже существует"
-                # Получить ID существующего клиента
-                client_id=$(curl -s -X GET \
-                    "$KEYCLOAK_URL/admin/realms/grist/clients?clientId=grist-client" \
-                    -H "Authorization: Bearer $token" | jq -r '.[0].id')
-            else
-                log_error "Ошибка при создании client: $error"
-            fi
-        else
-            log_error "Не удалось создать client"
-        fi
-    else
+    if [[ -n "$client_id" ]]; then
         log_success "OIDC client 'grist-client' создан (ID: $client_id)"
+        echo "$client_id"
+        return
     fi
 
-    echo "$client_id"
+    if [[ "$http_code" == "409" ]] || echo "$response" | grep -qi 'exists\|Conflict'; then
+        log_info "OIDC client 'grist-client' уже существует (HTTP $http_code)"
+        client_id=$(curl -s -X GET \
+            "$KEYCLOAK_URL/admin/realms/grist/clients?clientId=grist-client" \
+            -H "Authorization: Bearer $token" | jq -r '.[0].id // empty')
+        if [[ -n "$client_id" ]]; then
+            log_success "Используется существующий OIDC client (ID: $client_id)"
+            echo "$client_id"
+            return
+        fi
+    fi
+
+    err_txt=$(echo "$response" | jq -r '.error_description // .errorMessage // .error // empty' 2>/dev/null || true)
+    echo "Полный ответ Keycloak (HTTP $http_code): $response" >&2
+    if [[ -n "$err_txt" ]]; then
+        log_error "Ошибка при создании client: $err_txt"
+    fi
+    log_error "Не удалось создать client (нет id в ответе)"
 }
 
 ################################################################################
