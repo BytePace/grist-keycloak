@@ -111,7 +111,7 @@ update_realm_smtp() {
     http_code=$(curl -sS -o "$put_tmp" -w "%{http_code}" -X PUT \
         "$KEYCLOAK_URL/admin/realms/grist" \
         -H "Authorization: Bearer $token" \
-        -H "Content-Type: application/json" \
+        -H "Content-Type: application/json; charset=UTF-8" \
         -d "$merged")
     put_body=$(cat "$put_tmp")
     rm -f "$put_tmp"
@@ -128,22 +128,29 @@ create_realm() {
 
     log_info "Создание realm 'grist' (без SMTP в POST — он добавляется отдельно)..."
 
-    local tmp http_code response err_txt verify
+    # Тело только через jq + --data-binary: многострочный -d в bash иногда даёт Keycloak 400
+    # "unable to read contents from stream". refreshTokenLifespan не входит в RealmRepresentation —
+    # для SSO idle используем ssoSessionIdleTimeout.
+    local payload_file tmp http_code response err_txt verify
+    payload_file=$(mktemp)
+    jq -n '{
+        realm: "grist",
+        enabled: true,
+        displayName: "Grist",
+        loginTheme: "keycloak",
+        emailTheme: "keycloak",
+        accessTokenLifespan: 3600,
+        ssoSessionIdleTimeout: 604800,
+        offlineSessionIdleTimeout: 2592000
+    }' > "$payload_file"
+
     tmp=$(mktemp)
     http_code=$(curl -sS -o "$tmp" -w "%{http_code}" -X POST \
         "$KEYCLOAK_URL/admin/realms" \
         -H "Authorization: Bearer $token" \
-        -H "Content-Type: application/json" \
-        -d '{
-            "realm": "grist",
-            "enabled": true,
-            "displayName": "Grist",
-            "loginTheme": "keycloak",
-            "emailTheme": "keycloak",
-            "accessTokenLifespan": 3600,
-            "refreshTokenLifespan": 604800,
-            "offlineSessionIdleTimeout": 2592000
-        }')
+        -H "Content-Type: application/json; charset=UTF-8" \
+        --data-binary @"$payload_file")
+    rm -f "$payload_file"
     response=$(cat "$tmp")
     rm -f "$tmp"
 
