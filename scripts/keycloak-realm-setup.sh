@@ -181,13 +181,15 @@ create_oidc_client() {
 
     log_info "Создание OIDC client 'grist-client'..."
 
-    # ClientRepresentation: поле publicClient, не "public"; protocol — openid-connect
-    local tmp http_code response client_id err_txt
+    # ClientRepresentation: publicClient + protocol. При 201 Keycloak часто отдаёт пустое тело,
+    # UUID клиента — в заголовке Location: .../clients/<id>
+    local hdr tmp http_code response client_id err_txt location
+    hdr=$(mktemp)
     tmp=$(mktemp)
-    http_code=$(curl -sS -o "$tmp" -w "%{http_code}" -X POST \
+    http_code=$(curl -sS -D "$hdr" -o "$tmp" -w "%{http_code}" -X POST \
         "$KEYCLOAK_URL/admin/realms/grist/clients" \
         -H "Authorization: Bearer $token" \
-        -H "Content-Type: application/json" \
+        -H "Content-Type: application/json; charset=UTF-8" \
         -d '{
             "clientId": "grist-client",
             "protocol": "openid-connect",
@@ -209,8 +211,19 @@ create_oidc_client() {
         }')
     response=$(cat "$tmp")
     rm -f "$tmp"
+    location=$(grep -i '^[Ll]ocation:' "$hdr" | head -1 | tr -d '\r' | sed 's/^[Ll]ocation:[[:space:]]*//')
+    rm -f "$hdr"
 
     client_id=$(echo "$response" | jq -r '.id // empty')
+    if [[ -z "$client_id" ]] && [[ -n "$location" ]]; then
+        client_id="${location##*/}"
+        client_id="${client_id%%\?*}"
+    fi
+    if [[ -z "$client_id" ]] && [[ "$http_code" == "201" ]]; then
+        client_id=$(curl -s -X GET \
+            "$KEYCLOAK_URL/admin/realms/grist/clients?clientId=grist-client" \
+            -H "Authorization: Bearer $token" | jq -r '.[0].id // empty')
+    fi
 
     if [[ -n "$client_id" ]]; then
         log_success "OIDC client 'grist-client' создан (ID: $client_id)"
