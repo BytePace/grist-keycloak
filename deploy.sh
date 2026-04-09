@@ -1081,15 +1081,16 @@ main() {
     # Создание Keycloak realm и клиента
     setup_keycloak_realm
 
+    # nginx до HTTPS-тестов, иначе run_tests видит 404
+    if [[ "$SETUP_NGINX" == true ]]; then
+        run_nginx_setup || log_warning "nginx не применён — HTTPS тесты могут провалиться"
+    fi
+
     # Тесты развертывания
     run_tests
 
     # Вывод credentials и QR кода
     output_credentials
-
-    if [[ "$SETUP_NGINX" == true ]]; then
-        run_nginx_setup || true
-    fi
 
     log_step "Развертывание завершено!"
     log_success "Учетные данные сохранены в: $CREDENTIALS_FILE"
@@ -1118,6 +1119,8 @@ rollback_deployment() {
     log_info "Удаление Nginx конфигов..."
     rm -f /etc/nginx/sites-enabled/*bytepace.com.conf 2>/dev/null || true
     rm -f /etc/nginx/sites-available/*bytepace.com.conf 2>/dev/null || true
+    rm -f /etc/nginx/sites-enabled/grist-sso.conf 2>/dev/null || true
+    rm -f /etc/nginx/sites-available/grist-sso.conf 2>/dev/null || true
     systemctl reload nginx 2>/dev/null || true
 
     # Удаление SSL сертификатов если нужно

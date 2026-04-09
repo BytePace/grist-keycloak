@@ -17,10 +17,7 @@ server {
 
     ssl_certificate     __SSL_CERT_AUTH__;
     ssl_certificate_key __SSL_KEY_AUTH__;
-
-    ssl_session_timeout 1d;
-    ssl_session_cache shared:MozSSL:10m;
-    ssl_protocols TLSv1.2 TLSv1.3;
+    # ssl_protocols / session — часто уже в /etc/letsencrypt/options-ssl-nginx.conf (иначе warn «redefined»)
 
     client_max_body_size 50m;
 
@@ -54,10 +51,6 @@ server {
 
     ssl_certificate     __SSL_CERT_GRIST__;
     ssl_certificate_key __SSL_KEY_GRIST__;
-
-    ssl_session_timeout 1d;
-    ssl_session_cache shared:MozSSL:10m;
-    ssl_protocols TLSv1.2 TLSv1.3;
 
     client_max_body_size 100m;
 
