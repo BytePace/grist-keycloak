@@ -26,16 +26,17 @@ GRIST_OIDC_CLIENT_SECRET_FILE="${GRIST_OIDC_CLIENT_SECRET_FILE:-/tmp/grist-clien
 # Функции
 ################################################################################
 
+# Все сообщения — в stderr, чтобы stdout оставался только для данных в $(...)
 log_info() {
-    echo -e "${BLUE}ℹ${NC} $1"
+    echo -e "${BLUE}ℹ${NC} $1" >&2
 }
 
 log_success() {
-    echo -e "${GREEN}✅${NC} $1"
+    echo -e "${GREEN}✅${NC} $1" >&2
 }
 
 log_error() {
-    echo -e "${RED}❌${NC} $1"
+    echo -e "${RED}❌${NC} $1" >&2
     exit 1
 }
 
@@ -57,9 +58,8 @@ get_admin_token() {
     local token=$(echo "$response" | jq -r '.access_token // empty')
 
     if [[ -z "$token" ]]; then
+        echo "Ответ Keycloak: $response" >&2
         log_error "Не удалось получить admin token"
-        echo "Ответ Keycloak: $response"
-        exit 1
     fi
 
     echo "$token"
@@ -185,9 +185,8 @@ get_client_secret() {
     local secret=$(echo "$response" | jq -r '.value // empty')
 
     if [[ -z "$secret" ]]; then
+        echo "Ответ: $response" >&2
         log_error "Не удалось получить client secret"
-        echo "Ответ: $response"
-        exit 1
     fi
 
     log_success "Client secret получен"
