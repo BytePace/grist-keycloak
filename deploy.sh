@@ -1000,6 +1000,32 @@ run_tests() {
 output_credentials() {
     log_step "Сохранение учетных данных"
 
+    local integration_json
+    if [[ "$WANT_SINGLE_ORG" == true ]]; then
+        integration_json=$(cat << EOF
+{
+  "grist_api_url": "https://$GRIST_DOMAIN",
+  "auth_type": "oidc",
+  "oidc_issuer": "https://$AUTH_DOMAIN/realms/grist",
+  "client_id": "grist-client",
+  "redirect_uri": "app://grist-callback"
+}
+EOF
+)
+    else
+        integration_json=$(cat << EOF
+{
+  "grist_api_url": "https://$GRIST_DOMAIN",
+  "grist_org": "$GRIST_ORG",
+  "auth_type": "oidc",
+  "oidc_issuer": "https://$AUTH_DOMAIN/realms/grist",
+  "client_id": "grist-client",
+  "redirect_uri": "app://grist-callback"
+}
+EOF
+)
+    fi
+
     # Создать файл с учетными данными
     cat > "$CREDENTIALS_FILE" << EOF
 ================================================================================
@@ -1075,14 +1101,9 @@ Grist Application:
 
 Use this configuration in your mobile app:
 
-{
-  "grist_api_url": "https://$GRIST_DOMAIN",
-  "grist_org": "$GRIST_ORG",
-  "auth_type": "oidc",
-  "oidc_issuer": "https://$AUTH_DOMAIN/realms/grist",
-  "client_id": "grist-client",
-  "redirect_uri": "app://grist-callback"
-}
+$integration_json
+
+$(if [[ "$WANT_SINGLE_ORG" == true ]]; then echo "Note: GRIST_SINGLE_ORG включён, поэтому grist_org в URL/конфиге приложения обычно не требуется."; else echo "Note: GRIST_SINGLE_ORG выключен (multi-org), поэтому приложению нужен grist_org (slug) для выбора team site."; fi)
 
 ================================================================================
 🔐 SECURITY NOTES
