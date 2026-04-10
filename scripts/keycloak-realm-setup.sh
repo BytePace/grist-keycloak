@@ -102,7 +102,8 @@ update_realm_smtp() {
             user: $u,
             password: $pw,
             from: $u
-        }') || {
+        }
+        | .verifyEmail = true') || {
         log_warning "Не удалось собрать JSON SMTP (jq). Настройте SMTP вручную в админке Keycloak."
         return 0
     }
@@ -117,7 +118,7 @@ update_realm_smtp() {
     rm -f "$put_tmp"
 
     if [[ "$http_code" == "204" ]] || [[ "$http_code" == "200" ]]; then
-        log_success "SMTP для realm 'grist' настроен"
+        log_success "SMTP для realm 'grist' настроен; Verify email включён (verifyEmail=true)"
     else
         log_warning "SMTP не применён (HTTP $http_code). Настройте вручную: Realm grist → Realm settings → Email. Ответ: $put_body"
     fi
@@ -139,6 +140,7 @@ create_realm() {
         displayName: "Grist",
         loginTheme: "keycloak",
         emailTheme: "keycloak",
+        verifyEmail: true,
         accessTokenLifespan: 3600,
         ssoSessionIdleTimeout: 604800,
         offlineSessionIdleTimeout: 2592000
@@ -336,18 +338,44 @@ get_client_secret() {
 enable_user_registration() {
     local token="$1"
 
-    log_info "Включение User Registration в realm..."
+    log_info "Включение User Registration в realm (без сброса verifyEmail)..."
 
-    curl -s -X PUT \
+    local realm_json merged put_tmp http_code put_body
+    realm_json=$(curl -s -H "Authorization: Bearer $token" "$KEYCLOAK_URL/admin/realms/grist")
+    if [[ -z "$realm_json" ]] || ! echo "$realm_json" | jq -e . >/dev/null 2>&1; then
+        log_warning "Не удалось прочитать realm для registration (пропуск merge)"
+        curl -s -X PUT \
+            "$KEYCLOAK_URL/admin/realms/grist" \
+            -H "Authorization: Bearer $token" \
+            -H "Content-Type: application/json" \
+            -d '{
+                "registrationAllowed": true,
+                "registrationEmailAsUsername": true
+            }' > /dev/null
+        log_success "User Registration включена (частичный PUT)"
+        return 0
+    fi
+
+    merged=$(echo "$realm_json" | jq \
+        '.registrationAllowed = true | .registrationEmailAsUsername = true | .verifyEmail = true') || {
+        log_warning "Не удалось собрать JSON registration (jq)"
+        return 0
+    }
+
+    put_tmp=$(mktemp)
+    http_code=$(curl -sS -o "$put_tmp" -w "%{http_code}" -X PUT \
         "$KEYCLOAK_URL/admin/realms/grist" \
         -H "Authorization: Bearer $token" \
-        -H "Content-Type: application/json" \
-        -d '{
-            "registrationAllowed": true,
-            "registrationEmailAsUsername": true
-        }' > /dev/null
+        -H "Content-Type: application/json; charset=UTF-8" \
+        -d "$merged")
+    put_body=$(cat "$put_tmp")
+    rm -f "$put_tmp"
 
-    log_success "User Registration включена"
+    if [[ "$http_code" == "204" ]] || [[ "$http_code" == "200" ]]; then
+        log_success "User Registration включена; Verify email остаётся включённым"
+    else
+        log_warning "PUT realm после registration: HTTP $http_code — проверьте вручную. Ответ: $put_body"
+    fi
 }
 
 ################################################################################
