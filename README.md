@@ -124,10 +124,12 @@ URL: `https://grist.example.com`
   "grist_org": "ssa",
   "auth_type": "oidc",
   "oidc_issuer": "https://auth.example.com/realms/grist",
-  "client_id": "grist-client",
-  "redirect_uri": "app://grist-callback"
+  "client_id": "grist-mobile",
+  "redirect_uri": "com.bytepace.scan-it-to-google-sheets://oauth/callback"
 }
 ```
+
+`grist-client` (с секретом) остаётся только для **контейнера Grist** (OIDC к Keycloak). Для **нативного приложения** скрипт создаёт отдельный **public** клиент `grist-mobile` с PKCE (S256); `redirect_uri` должен совпадать с `CFBundleURLSchemes` в iOS и с валидным redirect в Keycloak.
 
 Идентификаторы workspace и документов в приложении задаются отдельно под вашу схему данных.
 
@@ -249,8 +251,8 @@ struct GristConfig {
         orgId: "ssa",
         workspaceId: 3,
         oidcIssuer: "https://auth.example.com/realms/grist",
-        clientId: "grist-client",
-        redirectUri: "app://grist-callback"
+        clientId: "grist-mobile",
+        redirectUri: "com.bytepace.scan-it-to-google-sheets://oauth/callback"
     )
 }
 

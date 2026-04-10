@@ -2,7 +2,8 @@
 
 ################################################################################
 # Keycloak Realm и OIDC Client Setup
-# Создание realm "grist" и OIDC client "grist-client" через Admin API
+# Создание realm "grist", confidential client "grist-client" (Grist web) и
+# public client для нативных приложений (PKCE), по умолчанию "grist-mobile".
 ################################################################################
 
 set -euo pipefail
@@ -21,6 +22,9 @@ KEYCLOAK_URL="${KEYCLOAK_URL:-http://grist-sso-keycloak:8080}"
 GRIST_DOMAIN="${GRIST_DOMAIN}"
 AUTH_DOMAIN="${AUTH_DOMAIN}"
 GRIST_OIDC_CLIENT_SECRET_FILE="${GRIST_OIDC_CLIENT_SECRET_FILE:-/tmp/grist-client-secret.txt}"
+# Нативные приложения (iOS/Android): public client + PKCE, без client_secret
+GRIST_MOBILE_OIDC_CLIENT_ID="${GRIST_MOBILE_OIDC_CLIENT_ID:-grist-mobile}"
+GRIST_MOBILE_OIDC_REDIRECT_URI="${GRIST_MOBILE_OIDC_REDIRECT_URI:-com.bytepace.scan-it-to-google-sheets://oauth/callback}"
 
 ################################################################################
 # Функции
@@ -277,6 +281,132 @@ create_oidc_client() {
 }
 
 ################################################################################
+# Public OIDC client для нативных приложений (PKCE S256)
+# Отдельно от grist-client: тот confidential и с секретом для сервера Grist.
+################################################################################
+
+create_or_update_oidc_mobile_client() {
+    local token="$1"
+    local client_id_name="$GRIST_MOBILE_OIDC_CLIENT_ID"
+    local redirect_uri="$GRIST_MOBILE_OIDC_REDIRECT_URI"
+
+    log_info "OIDC client '$client_id_name' (public + PKCE) для нативных приложений; redirect: $redirect_uri"
+
+    local internal_uuid
+    internal_uuid=$(curl -s -G \
+        "$KEYCLOAK_URL/admin/realms/grist/clients" \
+        --data-urlencode "clientId=$client_id_name" \
+        -H "Authorization: Bearer $token" | jq -r '.[0].id // empty')
+
+    local payload_file tmp http_code response err_txt hdr location
+    payload_file=$(mktemp)
+    jq -n \
+        --arg cid "$client_id_name" \
+        --arg uri "$redirect_uri" \
+        '{
+            clientId: $cid,
+            protocol: "openid-connect",
+            enabled: true,
+            publicClient: true,
+            bearerOnly: false,
+            standardFlowEnabled: true,
+            directAccessGrantsEnabled: false,
+            implicitFlowEnabled: false,
+            serviceAccountsEnabled: false,
+            authorizationServicesEnabled: false,
+            redirectUris: [$uri],
+            webOrigins: ["+"],
+            attributes: {
+                "pkce.code.challenge.method": "S256"
+            }
+        }' > "$payload_file"
+
+    if [[ -z "$internal_uuid" ]]; then
+        hdr=$(mktemp)
+        tmp=$(mktemp)
+        http_code=$(curl -sS -D "$hdr" -o "$tmp" -w "%{http_code}" -X POST \
+            "$KEYCLOAK_URL/admin/realms/grist/clients" \
+            -H "Authorization: Bearer $token" \
+            -H "Content-Type: application/json; charset=UTF-8" \
+            --data-binary @"$payload_file")
+        response=$(cat "$tmp")
+        rm -f "$tmp"
+        location=$(grep -i '^[Ll]ocation:' "$hdr" | head -1 | tr -d '\r' | sed 's/^[Ll]ocation:[[:space:]]*//')
+        rm -f "$hdr"
+
+        internal_uuid=$(echo "$response" | jq -r '.id // empty')
+        if [[ -z "$internal_uuid" && -n "$location" ]]; then
+            internal_uuid="${location##*/}"
+            internal_uuid="${internal_uuid%%\?*}"
+        fi
+        if [[ -z "$internal_uuid" && "$http_code" == "201" ]]; then
+            internal_uuid=$(curl -s -G \
+                "$KEYCLOAK_URL/admin/realms/grist/clients" \
+                --data-urlencode "clientId=$client_id_name" \
+                -H "Authorization: Bearer $token" | jq -r '.[0].id // empty')
+        fi
+
+        rm -f "$payload_file"
+
+        if [[ "$http_code" == "201" ]] && [[ -n "$internal_uuid" ]]; then
+            log_success "OIDC client '$client_id_name' создан (UUID: $internal_uuid)"
+            return 0
+        fi
+        if [[ "$http_code" == "409" ]] || echo "$response" | grep -qi 'exists\|Conflict'; then
+            log_info "Клиент '$client_id_name' уже существует (HTTP $http_code), синхронизация настроек..."
+            internal_uuid=$(curl -s -G \
+                "$KEYCLOAK_URL/admin/realms/grist/clients" \
+                --data-urlencode "clientId=$client_id_name" \
+                -H "Authorization: Bearer $token" | jq -r '.[0].id // empty')
+        else
+            err_txt=$(echo "$response" | jq -r '.error_description // .errorMessage // .error // empty' 2>/dev/null || true)
+            echo "Ответ Keycloak (HTTP $http_code): $response" >&2
+            log_error "Не удалось создать '$client_id_name': ${err_txt:-HTTP $http_code}"
+        fi
+    else
+        rm -f "$payload_file"
+        log_info "Клиент '$client_id_name' найден (UUID: $internal_uuid), проверка redirect URI и PKCE..."
+    fi
+
+    if [[ -z "$internal_uuid" ]]; then
+        log_error "Не удалось определить UUID клиента '$client_id_name' в Keycloak"
+    fi
+
+    local current merged put_tmp put_http
+    current=$(curl -sS -X GET \
+        "$KEYCLOAK_URL/admin/realms/grist/clients/$internal_uuid" \
+        -H "Authorization: Bearer $token")
+
+    put_tmp=$(mktemp)
+    echo "$current" | jq --arg uri "$redirect_uri" '
+        .publicClient = true |
+        .standardFlowEnabled = true |
+        .directAccessGrantsEnabled = false |
+        .implicitFlowEnabled = false |
+        .serviceAccountsEnabled = false |
+        .authorizationServicesEnabled = false |
+        (.redirectUris // []) as $r |
+        .redirectUris = ($r + [$uri] | unique) |
+        .webOrigins = (if (.webOrigins // []) | length > 0 then .webOrigins else ["+"] end) |
+        .attributes = (.attributes // {}) |
+        .attributes["pkce.code.challenge.method"] = "S256"
+    ' > "$put_tmp"
+
+    put_http=$(curl -sS -o /dev/null -w "%{http_code}" -X PUT \
+        "$KEYCLOAK_URL/admin/realms/grist/clients/$internal_uuid" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json; charset=UTF-8" \
+        -d @"$put_tmp")
+    rm -f "$put_tmp"
+
+    if [[ "$put_http" == "204" ]] || [[ "$put_http" == "200" ]]; then
+        log_success "Клиент '$client_id_name' обновлён (HTTP $put_http): public, PKCE S256, redirect в списке"
+    else
+        log_warning "PUT '$client_id_name' вернул HTTP $put_http — проверьте клиент в Keycloak Admin Console"
+    fi
+}
+
+################################################################################
 # Post-logout redirect (Grist → Keycloak logout с post_logout_redirect_uri)
 ################################################################################
 
@@ -494,6 +624,9 @@ main() {
     client_id=$(create_oidc_client "$admin_token")
 
     ensure_oidc_client_post_logout_redirect "$admin_token" "$client_id"
+
+    # Публичный клиент для iOS/Android (PKCE), отдельно от grist-client
+    create_or_update_oidc_mobile_client "$admin_token"
 
     # Получить client secret
     local client_secret

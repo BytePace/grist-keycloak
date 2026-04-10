@@ -144,8 +144,8 @@ Password: [смотреть в /opt/grist-sso/deploy-credentials.txt]
   "grist_org": "ssa",
   "auth_type": "oidc",
   "oidc_issuer": "https://auth.example.com/realms/grist",
-  "client_id": "grist-client",
-  "redirect_uri": "app://grist-callback"
+  "client_id": "grist-mobile",
+  "redirect_uri": "com.bytepace.scan-it-to-google-sheets://oauth/callback"
 }
 ```
 
@@ -162,8 +162,8 @@ struct GristConfig {
         orgId: "ssa",
         workspaceId: 3,
         oidcIssuer: "https://auth.example.com/realms/grist",
-        clientId: "grist-client",
-        redirectUri: "app://grist-callback"
+        clientId: "grist-mobile",
+        redirectUri: "com.bytepace.scan-it-to-google-sheets://oauth/callback"
     )
 }
 
