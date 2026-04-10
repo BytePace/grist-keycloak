@@ -8,27 +8,20 @@
 
 ```
 grist-keycloak/
-├── 📄 deploy.sh                    ← ОСНОВНОЙ СКРИПТ (600+ строк)
-│                                    Запускает всё развертывание
-│
-├── 📄 QUICKSTART.md                ← ЧИТАЙТЕ СНАЧАЛА
-│                                    Быстрый старт в 5 минут
-│
-├── 📄 README.md                    ← ПОЛНАЯ ДОКУМЕНТАЦИЯ
-│                                    Все параметры, примеры, справка
-│
-├── 📄 .gitignore                   ← Защита от коммита паролей
-│
+├── 📄 deploy.sh                    ← ОСНОВНОЙ СКРИПТ (~1100+ строк)
+├── 📄 QUICKSTART.md
+├── 📄 README.md
+├── 📄 IMPLEMENTATION_SUMMARY.md    ← Этот файл (корень репо)
+├── 📄 .gitignore
+├── nginx/
+│   └── grist-sso.conf.template
 ├── scripts/
-│   ├── keycloak-realm-setup.sh     ← Создание realm и OIDC client
-│   └── test-deployment.sh          ← Тесты после развертывания
-│
-├── docs/
-│   ├── TROUBLESHOOTING.md          ← Решение проблем
-│   ├── FAQ.md                      ← Часто задаваемые вопросы
-│   └── IMPLEMENTATION_SUMMARY.md   ← Этот файл
-│
-└── .git/                           ← Git репо
+│   ├── keycloak-realm-setup.sh
+│   ├── setup-nginx.sh
+│   └── test-deployment.sh
+└── docs/
+    ├── TROUBLESHOOTING.md
+    └── FAQ.md
 ```
 
 ---
@@ -48,7 +41,7 @@ grist-keycloak/
 ### Фаза 2: Конфигурация
 ```
 ✅ Создание /opt/grist-sso директории
-✅ Генерация .env файла (chmod 600)
+✅ Генерация .env (chmod 600); при KEEP_DATA и существующем .env — переиспользование секретов (согласованность с томом PostgreSQL)
 ✅ Генерация docker-compose.yml
 ```
 
@@ -68,28 +61,25 @@ grist-keycloak/
 ✅ Пересоздание Grist с OIDC
 ```
 
-### Фаза 5: Безопасность
+### Фаза 5: Опционально — Nginx (флаг `--setup-nginx`)
 ```
-✅ Создание Nginx конфигов для auth.example.com
-✅ Создание Nginx конфигов для grist.example.com
-✅ Запрос Let's Encrypt сертификатов (certbot)
-✅ Конфигурирование HTTPS редиректов
+✅ Установка пакета nginx при необходимости
+✅ Шаблон nginx/grist-sso.conf.template → /etc/nginx/sites-available/grist-sso.conf
+✅ Прокси на Keycloak (127.0.0.1:8090) и Grist (127.0.0.1:3000)
+✅ Пути к уже существующим сертификатам Let's Encrypt (/etc/letsencrypt/live/…)
 ```
+**Не входит в deploy.sh:** вызов certbot — сертификаты выпускаются вручную до или после деплоя.
 
 ### Фаза 6: Проверка
 ```
-✅ Тесты доступности (DNS, ports, HTTPS)
-✅ Тесты OIDC discovery endpoint
-✅ Проверка SSL сертификатов
-✅ Проверка PostgreSQL connection
+✅ scripts/test-deployment.sh: DNS, контейнеры, HTTPS, OIDC discovery, SSL, PostgreSQL, SMTP (эвристика), редирект OIDC
+✅ Функция test_ports (nc) в скрипте есть, в main() не вызывается
 ```
 
 ### Фаза 7: Вывод
 ```
 ✅ Сохранение credentials в /opt/grist-sso/deploy-credentials.txt (chmod 600)
-✅ Сохранение вывода в /opt/grist-sso/deploy-output.txt
-✅ Генерация QR кода для iOS/Android
-✅ Вывод JSON конфига в консоль
+✅ Сохранение вывода в /opt/grist-sso/deploy-output.txt (в т.ч. JSON для клиентов)
 ```
 
 ---
@@ -118,7 +108,6 @@ bash scripts/test-deployment.sh
 
 **Проверяет:**
 - ✅ DNS разрешение доменов (nslookup)
-- ✅ Открытость портов (nc -z)
 - ✅ Запущены ли контейнеры (docker ps)
 - ✅ HTTPS доступность (curl -k)
 - ✅ OIDC Discovery endpoint (curl + jq)
@@ -140,7 +129,7 @@ bash scripts/test-deployment.sh
 ```
 5 минут до запуска
 ├── Шаг 1: Подготовка (домены, требования)
-├── Шаг 2: Запуск develop.sh
+├── Шаг 2: Запуск deploy.sh
 ├── Шаг 3: Первый вход в Keycloak + Grist
 ├── Шаг 4: Интеграция с мобильным
 └── Основные команды и частые проблемы
@@ -229,13 +218,16 @@ sudo bash deploy.sh \
   --email-user admin@gmail.com \
   --email-password "xxxx xxxx xxxx xxxx" \
   --grist-admin-email admin@example.com \
-  --certbot-email admin@example.com
+  --certbot-email admin@example.com \
+  --setup-nginx
 ```
 
 ### Для тестирования
 
 ```bash
-cd /opt/grist-sso
+cd /path/to/grist-keycloak
+set -a && source /opt/grist-sso/.env && set +a
+export AUTH_DOMAIN GRIST_DOMAIN
 bash scripts/test-deployment.sh
 ```
 
@@ -274,7 +266,7 @@ sudo bash /path/to/grist-keycloak/deploy.sh --rollback --keep-data
 
 ```bash
 cd /path/to/grist-keycloak
-git pull origin main
+git pull origin master
 ```
 
 ### Обновить Keycloak версию
@@ -340,6 +332,7 @@ docker-compose up -d keycloak
 ```json
 {
   "grist_api_url": "https://grist.example.com",
+  "grist_org": "<GRIST_ORG из .env>",
   "auth_type": "oidc",
   "oidc_issuer": "https://auth.example.com/realms/grist",
   "client_id": "grist-client",
@@ -391,7 +384,7 @@ docker-compose up -d keycloak
 - Генерация сильных паролей (openssl rand)
 - Permissions 600 для .env и credentials
 - .gitignore защита от коммита паролей
-- HTTPS с Let's Encrypt
+- HTTPS через nginx при наличии сертификатов и `--setup-nginx` (certbot — отдельно)
 - OIDC вместо hardcoded API keys
 
 ✅ **Надежность:**
@@ -428,7 +421,7 @@ docker-compose up -d keycloak
 ### v1.0 (2026-04-09)
 - Базовое развертывание Grist + Keycloak + PostgreSQL
 - Автоматическое создание realm и OIDC client
-- Let's Encrypt SSL сертификаты
+- Опциональный nginx reverse proxy (`--setup-nginx`; LE вручную)
 - Тесты развертывания
 - Полная документация (README, FAQ, TROUBLESHOOTING)
 - Git защита паролей

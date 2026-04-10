@@ -307,6 +307,21 @@ docker volume rm grist-sso_keycloak-db-data
 docker-compose up -d postgres-keycloak keycloak
 ```
 
+### PostgreSQL: password authentication failed for user "keycloak"
+
+**Симптомы:** Keycloak в логах не подключается к БД; при первом запуске том PostgreSQL был инициализирован с одним паролем, а в `.env` сейчас другой.
+
+**Причина:** Пароль в Docker volume задаётся при первом `init` тома; смена `POSTGRES_KEYCLOAK_PASSWORD` в `.env` без пересоздания тома не меняет пароль внутри БД.
+
+**Решение:**
+
+1. Восстановить в `.env` тот пароль, что использовался при первом успешном деплое (из бэкапа `deploy-credentials.txt`), **или**
+2. Осознанно сбросить данные БД:  
+   `sudo bash deploy.sh ... --reset-postgres-volume`  
+   (удалит том PostgreSQL для Keycloak; сделайте бэкап, если данные нужны).
+
+При повторном деплое с `KEEP_DATA` скрипт подхватывает секреты из существующего `.env` — не перезаписывайте пароль БД случайно, если том уже есть.
+
 ---
 
 ## 🔴 Network Issues
@@ -335,6 +350,26 @@ nano /opt/grist-sso/docker-compose.yml
 docker-compose down
 docker-compose up -d
 ```
+
+### Nginx: 404 или default welcome при открытии домена
+
+**Симптомы:** `https://auth.example.com` отдаёт страницу по умолчанию nginx или 404, хотя контейнеры работают.
+
+**Решение:**
+
+```bash
+# 1. Убедиться, что деплой выполнялся с --setup-nginx или вручную запущен scripts/setup-nginx.sh
+sudo nginx -t
+ls -la /etc/nginx/sites-enabled/grist-sso.conf
+
+# 2. Проверить, что сертификаты есть в /etc/letsencrypt/live/<домен>/
+sudo ls /etc/letsencrypt/live/
+
+# 3. Перезагрузить nginx
+sudo systemctl reload nginx
+```
+
+Контейнеры слушают только `127.0.0.1`; снаружи должен быть nginx (или другой reverse proxy) с путями к PEM из Let's Encrypt.
 
 ### DNS not resolving
 
@@ -425,9 +460,12 @@ sudo ln -s /mnt/large-disk/grist-sso /opt/grist-sso
    tail -f /tmp/grist-keycloak-deploy.log
    ```
 
-2. **Запустить диагностику:**
+2. **Запустить диагностику** (скрипт в клоне репо, не в `/opt/grist-sso`):
    ```bash
-   bash /opt/grist-sso/scripts/test-deployment.sh
+   cd /path/to/grist-keycloak
+   set -a && source /opt/grist-sso/.env && set +a
+   export AUTH_DOMAIN GRIST_DOMAIN
+   bash scripts/test-deployment.sh
    ```
 
 3. **Проверить конфигурацию:**

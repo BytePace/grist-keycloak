@@ -38,10 +38,10 @@ Keycloak — это открытый сервер идентификации и 
 
 ### Сколько времени займет развертывание?
 
-Примерно **10-15 минут**:
+Примерно **10-15 минут** (без учёта ручного выпуска сертификатов certbot):
 - 5 минут на запуск контейнеров
 - 2 минуты на создание Keycloak realm/client
-- 3 минуты на SSL сертификаты
+- остальное — тесты и вывод
 
 ### Какие требования к серверу?
 
@@ -60,7 +60,7 @@ Keycloak — это открытый сервер идентификации и 
 if ! grep -qi "Ubuntu\|Debian" /etc/os-release; then
 ```
 
-### Где мне взять домены дляAuth и Grist?
+### Где мне взять домены для Auth и Grist?
 
 1. Купить домен на registrar (GoDaddy, Namecheap, etc.)
 2. Указать A record на IP адрес вашего VPS
@@ -69,12 +69,14 @@ if ! grep -qi "Ubuntu\|Debian" /etc/os-release; then
 
 ### Нужно ли мне иметь SSL сертификаты заранее?
 
-Нет! Скрипт автоматически:
-1. Запрашивает Let's Encrypt сертификаты через certbot
-2. Конфигурирует Nginx для HTTPS
-3. Настраивает auto-renewal
+**`deploy.sh` не вызывает certbot.** Для HTTPS снаружи:
 
-Только укажите email для уведомлений о истечении.
+1. Выпустите сертификаты Let's Encrypt для обоих доменов (например `sudo certbot certonly --nginx -d auth.example.com -d grist.example.com` или по одному домену — смотрите документацию certbot).
+2. Запустите развертывание с **`--setup-nginx`** (или позже `sudo bash scripts/setup-nginx.sh` из клона репо), чтобы записать `grist-sso.conf` и проксировать на Keycloak/Grist на localhost.
+
+Без nginx и сертификатов контейнеры слушают только локально (`127.0.0.1`); тесты HTTPS в `test-deployment.sh` ожидают доступность по доменам извне.
+
+Email `CERTBOT_EMAIL` в интерактивном режиме нужен для уведомлений Let's Encrypt при ручном certbot, не как автозапуск certbot из `deploy.sh`.
 
 ---
 
@@ -102,7 +104,7 @@ Permissions: 600 (только root может читать)
 
 **Через Admin Panel:**
 1. Открыть https://auth.example.com
-2. Нажать на профиль (右верхний угол) → Manage account
+2. Нажать на профиль (правый верхний угол) → Manage account
 3. Перейти в "Manage password"
 4. Ввести новый пароль
 
@@ -377,8 +379,8 @@ sudo bash deploy.sh
 
 ### Как получить поддержку?
 
-1. **Чекарт проблем**: `/opt/grist-sso/docs/TROUBLESHOOTING.md`
-2. **Диагностика**: `/opt/grist-sso/scripts/test-deployment.sh`
+1. **Чеклист проблем**: `docs/TROUBLESHOOTING.md` (в клоне репозитория)
+2. **Диагностика**: из клона репозитория, с `AUTH_DOMAIN`/`GRIST_DOMAIN` (например после `source /opt/grist-sso/.env`), см. `README.md` → раздел тестирования
 3. **Логи**: `/tmp/grist-keycloak-deploy.log` и `docker-compose logs`
 4. **GitHub Issues**: [Grist issues](https://github.com/gristlabs/grist/issues)
 5. **Keycloak Docs**: https://www.keycloak.org/docs/latest/

@@ -4,14 +4,14 @@
 
 ## ✨ Особенности
 
-- ✅ Полностью автоматизированное развертывание
-- ✅ Автоматическая генерация паролей и секретов
-- ✅ Let's Encrypt SSL сертификаты
+- ✅ Полностью автоматизированное развертывание Docker (PostgreSQL, Keycloak, Grist)
+- ✅ Генерация паролей и секретов; при повторном запуске с `KEEP_DATA` — загрузка из существующего `.env` (совместимость с томом БД)
+- ✅ Опционально: **nginx** reverse proxy и HTTPS (`--setup-nginx`; нужны уже выпущенные сертификаты Let's Encrypt для доменов)
 - ✅ Docker контейнеризация (легко обновлять)
 - ✅ Интерактивный и CLI режимы
 - ✅ Откатывание с сохранением данных
 - ✅ Автоматические тесты после развертывания
-- ✅ QR код для конфигурации iOS/Android приложений
+- ✅ JSON в `deploy-output.txt` для интеграции мобильных клиентов (отдельный QR-файл не создаётся)
 - ✅ OIDC SSO для Grist
 
 ## 🚀 Быстрый старт
@@ -41,8 +41,11 @@ sudo bash deploy.sh \
   --email-user noreply@gmail.com \
   --email-password "your-app-password" \
   --grist-admin-email admin@example.com \
-  --certbot-email admin@example.com
+  --certbot-email admin@example.com \
+  --setup-nginx
 ```
+
+`--setup-nginx` записывает конфиг в `/etc/nginx/sites-available/grist-sso.conf` и проксирует на Keycloak (`127.0.0.1:8090`) и Grist (`127.0.0.1:3000`). Перед этим выпустите сертификаты, например: `sudo certbot certonly --nginx -d auth.example.com` и `-d grist.example.com`.
 
 ## 📋 Что спрашивает скрипт
 
@@ -68,19 +71,17 @@ sudo bash deploy.sh \
 ## 🔄 Что происходит во время развертывания
 
 ```
-1. ✅ Проверка requirements (Docker, curl, openssl и т.д.)
-2. ✅ Генерация паролей и секретов
-3. ✅ Создание .env конфигурации
-4. ✅ Генерация docker-compose.yml
+1. ✅ Проверка requirements (Docker, curl, openssl, git, jq и т.д.)
+2. ✅ Загрузка секретов из существующего .env (если есть и KEEP_DATA) или генерация новых
+3. ✅ Создание .env и docker-compose.yml
+4. ✅ Опционально: сброс тома PostgreSQL (--reset-postgres-volume)
 5. ✅ Запуск контейнеров (PostgreSQL → Keycloak → Grist)
-6. ✅ Ожидание Keycloak (максимум 5 минут)
-7. ✅ Создание realm 'grist' в Keycloak
-8. ✅ Создание OIDC client 'grist-client'
-9. ✅ Получение client secret и обновление .env
-10. ✅ Пересоздание Grist контейнера с OIDC конфигурацией
-11. ✅ Запуск автоматических тестов
-12. ✅ Генерация QR кода для iOS/Android
-13. ✅ Сохранение credentials в защищённый файл
+6. ✅ Ожидание Keycloak (до ~5 минут)
+7. ✅ scripts/keycloak-realm-setup.sh: realm, SMTP (отдельным PUT), OIDC client, secret
+8. ✅ Обновление .env с client secret и перезапуск Grist
+9. ✅ Если указан --setup-nginx: nginx reverse proxy (до HTTPS-тестов)
+10. ✅ Запуск scripts/test-deployment.sh
+11. ✅ deploy-credentials.txt и deploy-output.txt (JSON для клиентов)
 ```
 
 ## 📂 Структура файлов
@@ -92,8 +93,7 @@ sudo bash deploy.sh \
 ├── .env                           # Конфигурация (chmod 600)
 ├── docker-compose.yml             # Docker Compose файл
 ├── deploy-credentials.txt          # Все пароли и ключи (chmod 600)
-├── deploy-output.txt              # Полный отчёт
-└── grist-config-qr.json          # QR код конфиг для мобильных
+└── deploy-output.txt              # Полный отчёт и JSON для мобильных клиентов
 ```
 
 ## 🔐 После развертывания
@@ -116,19 +116,20 @@ URL: `https://grist.example.com`
 
 ### 3. Интеграция с iOS приложением
 
-В файле `deploy-output.txt` есть QR код и JSON конфиг для `GristFunctionProcessor.swift`:
+В `deploy-output.txt` есть JSON (поля совпадают с тем, что пишет `deploy.sh`; `grist_org` — из переменной `GRIST_ORG`):
 
 ```json
 {
   "grist_api_url": "https://grist.example.com",
-  "grist_org_id": "ssa",
-  "grist_workspace_id": 3,
+  "grist_org": "ssa",
   "auth_type": "oidc",
-  "client_id": "grist-client",
   "oidc_issuer": "https://auth.example.com/realms/grist",
+  "client_id": "grist-client",
   "redirect_uri": "app://grist-callback"
 }
 ```
+
+Идентификаторы workspace и документов в приложении задаются отдельно под вашу схему данных.
 
 ## 🔄 Откатывание (откат развертывания)
 
@@ -155,23 +156,16 @@ sudo bash deploy.sh --rollback --delete-all
 
 ## 🧪 Тестирование развертывания
 
-После завершения скрипта тесты запускаются автоматически. Можно также запустить вручную:
+После завершения скрипта тесты запускаются автоматически. Вручную (из **клонированного репозитория**, не из `/opt/grist-sso` — там нет `scripts/`):
 
 ```bash
-cd /opt/grist-sso
+cd /path/to/grist-keycloak
+set -a && source /opt/grist-sso/.env && set +a
+export AUTH_DOMAIN GRIST_DOMAIN
 bash scripts/test-deployment.sh
 ```
 
-Проверяет:
-- ✅ DNS разрешение доменов
-- ✅ Открытость портов (80, 443, 22)
-- ✅ Запущены ли контейнеры
-- ✅ HTTPS доступность Keycloak и Grist
-- ✅ OIDC Discovery endpoint
-- ✅ SSL сертификаты валидны
-- ✅ PostgreSQL доступна
-- ✅ Email конфигурация
-- ✅ OIDC Login Flow
+Проверяет (см. `scripts/test-deployment.sh`): DNS, контейнеры, HTTPS Keycloak/Grist, OIDC discovery, SSL по доменам, PostgreSQL, SMTP в Keycloak (эвристика), редирект OIDC с Grist. Тест портов `nc` в скрипте есть, но **в прогон не входит** — не дублирует проверку HTTPS.
 
 ## 📊 Мониторинг
 
@@ -342,7 +336,7 @@ sudo systemctl reload nginx
 
 ## 📞 Поддержка
 
-Документация: See `/opt/grist-sso/docs/`
+Документация: в клоне репозитория `docs/` (например `docs/FAQ.md`, `docs/TROUBLESHOOTING.md`)
 
 Логи развертывания: `/tmp/grist-keycloak-deploy.log`
 

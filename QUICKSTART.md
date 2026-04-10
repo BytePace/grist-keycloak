@@ -41,7 +41,7 @@ ssh root@YOUR_VPS_IP
 
 ```bash
 cd /tmp
-git clone https://github.com/your-org/grist-keycloak.git
+git clone https://github.com/bytepace/grist-keycloak.git
 cd grist-keycloak
 ```
 
@@ -67,8 +67,9 @@ sudo bash deploy.sh
 Примерно **10-15 минут**:
 - Контейнеры загружаются
 - Keycloak стартует
-- SSL сертификаты создаются
 - Тесты запускаются
+
+**HTTPS:** `deploy.sh` не выпускает сертификаты. Перед продакшеном: certbot для доменов, затем повторный запуск с **`--setup-nginx`** (или `scripts/setup-nginx.sh`). Иначе Keycloak/Grist доступны по HTTP только на localhost за reverse proxy.
 
 ```
 ✅ Развертывание завершено!
@@ -140,14 +141,15 @@ Password: [смотреть в /opt/grist-sso/deploy-credentials.txt]
 ```json
 {
   "grist_api_url": "https://grist.example.com",
-  "grist_org_id": "ssa",
-  "grist_workspace_id": 3,
+  "grist_org": "ssa",
   "auth_type": "oidc",
-  "client_id": "grist-client",
   "oidc_issuer": "https://auth.example.com/realms/grist",
+  "client_id": "grist-client",
   "redirect_uri": "app://grist-callback"
 }
 ```
+
+`workspaceId` и прочие поля приложения — по вашей модели в коде iOS; в выводе деплоя их нет.
 
 ### Вставить в iOS приложение
 
@@ -211,7 +213,8 @@ docker-compose restart
 ### Откатить развертывание
 
 ```bash
-sudo bash /opt/grist-keycloak/deploy.sh --rollback --keep-data
+cd /path/to/grist-keycloak
+sudo bash deploy.sh --rollback --keep-data
 ```
 
 ---
@@ -243,7 +246,9 @@ sudo bash /opt/grist-keycloak/deploy.sh --rollback --keep-data
 ### 1. Проверить диагностику
 
 ```bash
-cd /opt/grist-sso
+cd /path/to/grist-keycloak
+set -a && source /opt/grist-sso/.env && set +a
+export AUTH_DOMAIN GRIST_DOMAIN
 bash scripts/test-deployment.sh
 ```
 
@@ -256,8 +261,7 @@ docker-compose logs grist | tail -50
 
 ### 3. Найти решение
 
-- 📖 **Документация**: `/opt/grist-keycloak/docs/TROUBLESHOOTING.md`
-- 📖 **FAQ**: `/opt/grist-keycloak/docs/FAQ.md`
+- 📖 **Документация**: в клоне репозитория `docs/TROUBLESHOOTING.md`, `docs/FAQ.md`
 - 🔧 **Общие проблемы**: раздел ниже
 
 ---
@@ -316,7 +320,7 @@ sudo certbot renew --force-renewal
 sudo systemctl reload nginx
 ```
 
-Больше решений в `/opt/grist-keycloak/docs/TROUBLESHOOTING.md`
+Больше решений в `docs/TROUBLESHOOTING.md` (в клоне репозитория)
 
 ---
 
