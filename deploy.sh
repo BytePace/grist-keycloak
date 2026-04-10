@@ -36,6 +36,19 @@ EMAIL_HOST="smtp.gmail.com"
 EMAIL_PORT="587"
 GRIST_ADMIN_EMAIL=""
 GRIST_ORG="ssa"
+# true = в контейнер уйдёт GRIST_SINGLE_ORG=$GRIST_ORG; false = переменная пустая (несколько team sites)
+WANT_SINGLE_ORG=true
+# Если заданы через CLI — не спрашивать в интерактиве (при наличии TTY)
+SKIP_PROMPT_SINGLE_ORG=false
+SKIP_PROMPT_FORCE_LOGIN=false
+SKIP_PROMPT_PERSONAL_ORGS=false
+SKIP_PROMPT_ORG_CREATION_ANYONE=false
+# true/false — см. README grist-core (анонимы → логин; публичные шары только после входа)
+GRIST_FORCE_LOGIN="true"
+# true/false — создавать ли личные org (docs-*) при первом входе пользователя
+GRIST_PERSONAL_ORGS="true"
+# true/false — могут ли не-админы создавать новые team sites (false также тянет за собой более жёсткие умолчания в Grist)
+GRIST_ORG_CREATION_ANYONE="true"
 # Grist OIDC: по умолчанию требует email_verified=true у IdP; true = не проверять (см. docs/TROUBLESHOOTING.md)
 GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED="false"
 CERTBOT_EMAIL=""
@@ -116,6 +129,15 @@ check_requirements() {
 # Обработка аргументов
 ################################################################################
 
+assert_bool_flag() {
+    local name="$1"
+    local val="$2"
+    if [[ "$val" != true && "$val" != false ]]; then
+        log_error "$name должен быть true или false (получено: $val)"
+        exit 1
+    fi
+}
+
 parse_arguments() {
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -179,6 +201,34 @@ parse_arguments() {
                 GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED="true"
                 shift
                 ;;
+            --single-org)
+                WANT_SINGLE_ORG=true
+                SKIP_PROMPT_SINGLE_ORG=true
+                shift
+                ;;
+            --multi-org)
+                WANT_SINGLE_ORG=false
+                SKIP_PROMPT_SINGLE_ORG=true
+                shift
+                ;;
+            --grist-force-login)
+                GRIST_FORCE_LOGIN="$2"
+                assert_bool_flag "--grist-force-login" "$GRIST_FORCE_LOGIN"
+                SKIP_PROMPT_FORCE_LOGIN=true
+                shift 2
+                ;;
+            --grist-personal-orgs)
+                GRIST_PERSONAL_ORGS="$2"
+                assert_bool_flag "--grist-personal-orgs" "$GRIST_PERSONAL_ORGS"
+                SKIP_PROMPT_PERSONAL_ORGS=true
+                shift 2
+                ;;
+            --grist-org-creation-anyone)
+                GRIST_ORG_CREATION_ANYONE="$2"
+                assert_bool_flag "--grist-org-creation-anyone" "$GRIST_ORG_CREATION_ANYONE"
+                SKIP_PROMPT_ORG_CREATION_ANYONE=true
+                shift 2
+                ;;
             *)
                 log_error "Неизвестный параметр: $1"
                 print_usage
@@ -223,6 +273,11 @@ print_usage() {
   --ignore-email-verified         GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED=true: разрешить
                                   вход в Grist без подтверждения email в IdP (Keycloak
                                   часто отдаёт email_verified=false при отключённой верификации)
+  --single-org                    GRIST_SINGLE_ORG=\$GRIST_ORG (режим одной команды, как по умолчанию)
+  --multi-org                     не задавать GRIST_SINGLE_ORG (несколько team sites)
+  --grist-force-login BOOL        true|false — GRIST_FORCE_LOGIN (без TTY не спрашиваем вопросы)
+  --grist-personal-orgs BOOL      true|false — GRIST_PERSONAL_ORGS
+  --grist-org-creation-anyone BOOL true|false — GRIST_ORG_CREATION_ANYONE
 
 Примеры:
   # С verbose режимом для отладки
@@ -234,6 +289,59 @@ EOF
 ################################################################################
 # Интерактивный ввод
 ################################################################################
+
+# Запрос да/нет; пустой ввод = default_bool (true|false); возвращает true или false
+read_bool_interactive() {
+    local prompt="$1"
+    local default_bool="$2"
+    local hint r
+    if [[ "$default_bool" == true ]]; then hint="[Y/n]"; else hint="[y/N]"; fi
+    read -r -p "$prompt $hint: " r || true
+    r=$(echo "${r:-}" | tr '[:upper:]' '[:lower:]')
+    r="${r#"${r%%[![:space:]]*}"}"
+    r="${r%"${r##*[![:space:]]}"}"
+    if [[ -z "$r" ]]; then
+        echo "$default_bool"
+        return
+    fi
+    case "$r" in
+        y|yes|д|да) echo true ;;
+        n|no|н|нет) echo false ;;
+        *) echo "$default_bool" ;;
+    esac
+}
+
+interactive_grist_env_prompts() {
+    [[ -t 0 ]] || return 0
+
+    local v
+    echo ""
+    log_info "Дополнительные настройки Grist (переменные окружения контейнера):"
+
+    if [[ "$SKIP_PROMPT_SINGLE_ORG" != true ]]; then
+        log_info "GRIST_SINGLE_ORG: одна команда (team site) со slug из GRIST_ORG; без лишнего /o/<org> в URL, как в типичном self-hosted."
+        v=$(read_bool_interactive "Включить GRIST_SINGLE_ORG (организация «${GRIST_ORG}»)?" true)
+        if [[ "$v" == true ]]; then WANT_SINGLE_ORG=true; else WANT_SINGLE_ORG=false; fi
+    fi
+
+    if [[ "$SKIP_PROMPT_FORCE_LOGIN" != true ]]; then
+        log_info "GRIST_FORCE_LOGIN: при true анонимы всегда перенаправляются на вход; даже публично расшаренные документы откроются только после авторизации."
+        v=$(read_bool_interactive "Включить GRIST_FORCE_LOGIN?" true)
+        GRIST_FORCE_LOGIN="$v"
+    fi
+
+    if [[ "$SKIP_PROMPT_PERSONAL_ORGS" != true ]]; then
+        log_info "GRIST_PERSONAL_ORGS: при true у новых пользователей создаётся личная org (типа docs-*). При false — нет."
+        v=$(read_bool_interactive "Разрешить личные организации (GRIST_PERSONAL_ORGS)?" true)
+        GRIST_PERSONAL_ORGS="$v"
+    fi
+
+    if [[ "$SKIP_PROMPT_ORG_CREATION_ANYONE" != true ]]; then
+        log_info "GRIST_ORG_CREATION_ANYONE: при true обычные пользователи могут создавать новые team sites. При false Grist обычно ужесточает и ANON_PLAYGROUND, и PERSONAL_ORGS по умолчанию (см. README grist-core)."
+        v=$(read_bool_interactive "Разрешить создание team sites всем залогиненным (GRIST_ORG_CREATION_ANYONE)?" true)
+        GRIST_ORG_CREATION_ANYONE="$v"
+    fi
+}
 
 interactive_input() {
     log_step "Интерактивная настройка"
@@ -286,6 +394,8 @@ interactive_input() {
             exit 1
         fi
     fi
+
+    interactive_grist_env_prompts
 
     log_success "Конфигурация введена"
 }
@@ -355,6 +465,16 @@ generate_secrets() {
         [[ -n "$_grist_iev" ]] && GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED="$_grist_iev"
         _grist_def=$(read_env_var GRIST_DEFAULT_EMAIL "$ENV_FILE")
         [[ -n "$_grist_def" ]] && GRIST_ADMIN_EMAIL="$_grist_def"
+        _grist_org=$(read_env_var GRIST_ORG "$ENV_FILE")
+        [[ -n "$_grist_org" ]] && GRIST_ORG="$_grist_org"
+        _grist_so=$(read_env_var GRIST_SINGLE_ORG "$ENV_FILE")
+        if [[ -n "$_grist_so" ]]; then WANT_SINGLE_ORG=true; else WANT_SINGLE_ORG=false; fi
+        _grist_fl=$(read_env_var GRIST_FORCE_LOGIN "$ENV_FILE")
+        [[ -n "$_grist_fl" ]] && GRIST_FORCE_LOGIN="$_grist_fl"
+        _grist_po=$(read_env_var GRIST_PERSONAL_ORGS "$ENV_FILE")
+        [[ -n "$_grist_po" ]] && GRIST_PERSONAL_ORGS="$_grist_po"
+        _grist_oca=$(read_env_var GRIST_ORG_CREATION_ANYONE "$ENV_FILE")
+        [[ -n "$_grist_oca" ]] && GRIST_ORG_CREATION_ANYONE="$_grist_oca"
         if [[ -z "$POSTGRES_KEYCLOAK_PASSWORD" ]]; then
             log_error "В $ENV_FILE нет POSTGRES_KEYCLOAK_PASSWORD, а файл существует. Исправьте .env или удалите том БД."
             exit 1
@@ -406,6 +526,12 @@ create_env_file() {
     log_step "Создание .env файла"
 
     local ENV_FILE="$DEPLOY_DIR/.env"
+    local GRIST_SINGLE_ORG
+    if [[ "$WANT_SINGLE_ORG" == true ]]; then
+        GRIST_SINGLE_ORG="$GRIST_ORG"
+    else
+        GRIST_SINGLE_ORG=""
+    fi
 
     if [[ "$VERBOSE" == true ]]; then
         log_verbose "Creating .env file at: $ENV_FILE"
@@ -433,9 +559,14 @@ GRIST_OIDC_CLIENT_SECRET=$GRIST_OIDC_CLIENT_SECRET
 
 # Grist
 GRIST_ORG=$GRIST_ORG
+# Пусто = несколько team sites; иначе slug одной org (см. GRIST_SINGLE_ORG в документации Grist)
+GRIST_SINGLE_ORG=$GRIST_SINGLE_ORG
 # В Grist используется именно GRIST_DEFAULT_EMAIL (владелец инстанса и single-org при GRIST_SINGLE_ORG)
 GRIST_DEFAULT_EMAIL=$GRIST_ADMIN_EMAIL
 GRIST_API_KEY=$GRIST_API_KEY
+GRIST_FORCE_LOGIN=$GRIST_FORCE_LOGIN
+GRIST_PERSONAL_ORGS=$GRIST_PERSONAL_ORGS
+GRIST_ORG_CREATION_ANYONE=$GRIST_ORG_CREATION_ANYONE
 # true — не требовать email_verified от Keycloak (иначе Grist: «verify your email»)
 GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED=$GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED
 
@@ -539,10 +670,12 @@ services:
       GRIST_OIDC_IDP_SCOPES: openid profile email
       GRIST_OIDC_IDP_CLIENT_ID: ${GRIST_OIDC_CLIENT_ID}
       GRIST_OIDC_IDP_CLIENT_SECRET: ${GRIST_OIDC_CLIENT_SECRET}
-      GRIST_FORCE_LOGIN: "true"
+      GRIST_FORCE_LOGIN: "${GRIST_FORCE_LOGIN}"
       GRIST_ANON_PLAYGROUND: "false"
       GRIST_DEFAULT_EMAIL: ${GRIST_DEFAULT_EMAIL}
-      GRIST_SINGLE_ORG: ${GRIST_ORG}
+      GRIST_SINGLE_ORG: "${GRIST_SINGLE_ORG}"
+      GRIST_PERSONAL_ORGS: "${GRIST_PERSONAL_ORGS}"
+      GRIST_ORG_CREATION_ANYONE: "${GRIST_ORG_CREATION_ANYONE}"
       GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED: "${GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED}"
     volumes:
       - grist-data:/persist
@@ -1067,6 +1200,10 @@ main() {
         log_verbose "  KEEP_DATA: $KEEP_DATA"
         log_verbose "  RESET_POSTGRES_VOLUME: $RESET_POSTGRES_VOLUME"
         log_verbose "  SETUP_NGINX: $SETUP_NGINX"
+        log_verbose "  WANT_SINGLE_ORG: $WANT_SINGLE_ORG"
+        log_verbose "  GRIST_FORCE_LOGIN: $GRIST_FORCE_LOGIN"
+        log_verbose "  GRIST_PERSONAL_ORGS: $GRIST_PERSONAL_ORGS"
+        log_verbose "  GRIST_ORG_CREATION_ANYONE: $GRIST_ORG_CREATION_ANYONE"
     fi
 
     # Проверка requirements
