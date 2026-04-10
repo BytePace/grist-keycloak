@@ -119,7 +119,9 @@ update_realm_smtp() {
             password: $pw,
             from: $u
         }
-        | .verifyEmail = true') || {
+        | .verifyEmail = true
+        | .resetPasswordAllowed = true
+        | .rememberMe = true') || {
         log_warning "Не удалось собрать JSON SMTP (jq). Настройте SMTP вручную в админке Keycloak."
         return 0
     }
@@ -157,6 +159,8 @@ create_realm() {
         loginTheme: "keycloak",
         emailTheme: "keycloak",
         verifyEmail: true,
+        resetPasswordAllowed: true,
+        rememberMe: true,
         accessTokenLifespan: 3600,
         ssoSessionIdleTimeout: 604800,
         offlineSessionIdleTimeout: 2592000
@@ -373,7 +377,11 @@ enable_user_registration() {
     fi
 
     merged=$(echo "$realm_json" | jq \
-        '.registrationAllowed = true | .registrationEmailAsUsername = true | .verifyEmail = true') || {
+        '.registrationAllowed = true
+         | .registrationEmailAsUsername = true
+         | .verifyEmail = true
+         | .resetPasswordAllowed = true
+         | .rememberMe = true') || {
         log_warning "Не удалось собрать JSON registration (jq)"
         return 0
     }
