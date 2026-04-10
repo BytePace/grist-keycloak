@@ -207,7 +207,10 @@ create_oidc_client() {
                 "https://'$GRIST_DOMAIN'"
             ],
             "rootUrl": "https://'$GRIST_DOMAIN'",
-            "baseUrl": "https://'$GRIST_DOMAIN'"
+            "baseUrl": "https://'$GRIST_DOMAIN'",
+            "attributes": {
+                "post.logout.redirect.uris": "https://'$GRIST_DOMAIN'/signed-out"
+            }
         }')
     response=$(cat "$tmp")
     rm -f "$tmp"
@@ -249,6 +252,56 @@ create_oidc_client() {
         log_error "Ошибка при создании client: $err_txt"
     fi
     log_error "Не удалось создать client (нет id в ответе)"
+}
+
+################################################################################
+# Post-logout redirect (Grist → Keycloak logout с post_logout_redirect_uri)
+################################################################################
+
+# Keycloak 18+ не принимает post_logout_redirect_uri, если URL не в post.logout.redirect.uris
+# (ошибка «Invalid redirect uri» на /protocol/openid-connect/logout).
+ensure_oidc_client_post_logout_redirect() {
+    local token="$1"
+    local client_id="$2"
+
+    if [[ -z "$client_id" || -z "$GRIST_DOMAIN" ]]; then
+        return 0
+    fi
+
+    local post_logout_uri="https://${GRIST_DOMAIN}/signed-out"
+    log_info "Проверка post.logout.redirect.uris для grist-client → $post_logout_uri"
+
+    local current tmp merged http_code
+    current=$(curl -sS -X GET \
+        "$KEYCLOAK_URL/admin/realms/grist/clients/$client_id" \
+        -H "Authorization: Bearer $token")
+
+    tmp=$(mktemp)
+    echo "$current" | jq --arg u "$post_logout_uri" '
+        .attributes = (.attributes // {}) |
+        .attributes["post.logout.redirect.uris"] = (
+            if ((.attributes["post.logout.redirect.uris"] // "") | index($u)) != null then
+                .attributes["post.logout.redirect.uris"]
+            elif (.attributes["post.logout.redirect.uris"] // "") == "" then
+                $u
+            else
+                .attributes["post.logout.redirect.uris"] + "##" + $u
+            end
+        )
+    ' > "$tmp"
+
+    http_code=$(curl -sS -o /dev/null -w "%{http_code}" -X PUT \
+        "$KEYCLOAK_URL/admin/realms/grist/clients/$client_id" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json; charset=UTF-8" \
+        -d @"$tmp")
+    rm -f "$tmp"
+
+    if [[ "$http_code" == "204" ]] || [[ "$http_code" == "200" ]]; then
+        log_success "post.logout.redirect.uris обновлён (HTTP $http_code)"
+    else
+        log_info "PUT client для post-logout вернул HTTP $http_code (проверьте клиент вручную в Admin Console)"
+    fi
 }
 
 ################################################################################
@@ -387,6 +440,8 @@ main() {
     # Создать OIDC client
     local client_id
     client_id=$(create_oidc_client "$admin_token")
+
+    ensure_oidc_client_post_logout_redirect "$admin_token" "$client_id"
 
     # Получить client secret
     local client_secret

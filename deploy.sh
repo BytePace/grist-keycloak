@@ -36,6 +36,8 @@ EMAIL_HOST="smtp.gmail.com"
 EMAIL_PORT="587"
 GRIST_ADMIN_EMAIL=""
 GRIST_ORG="ssa"
+# Grist OIDC: по умолчанию требует email_verified=true у IdP; true = не проверять (см. docs/TROUBLESHOOTING.md)
+GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED="false"
 CERTBOT_EMAIL=""
 KEYCLOAK_VERSION="24.0"
 GRIST_VERSION="latest"
@@ -173,6 +175,10 @@ parse_arguments() {
                 SETUP_NGINX=true
                 shift
                 ;;
+            --ignore-email-verified)
+                GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED="true"
+                shift
+                ;;
             *)
                 log_error "Неизвестный параметр: $1"
                 print_usage
@@ -214,6 +220,9 @@ print_usage() {
                                   данные realm в Postgres будут потеряны)
   --setup-nginx                   После деплоя установить конфиг nginx (нужны
                                   сертификаты certbot для AUTH_DOMAIN и GRIST_DOMAIN)
+  --ignore-email-verified         GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED=true: разрешить
+                                  вход в Grist без подтверждения email в IdP (Keycloak
+                                  часто отдаёт email_verified=false при отключённой верификации)
 
 Примеры:
   # С verbose режимом для отладки
@@ -342,6 +351,10 @@ generate_secrets() {
         POSTGRES_KEYCLOAK_PASSWORD=$(read_env_var POSTGRES_KEYCLOAK_PASSWORD "$ENV_FILE")
         GRIST_OIDC_CLIENT_SECRET=$(read_env_var GRIST_OIDC_CLIENT_SECRET "$ENV_FILE")
         GRIST_API_KEY=$(read_env_var GRIST_API_KEY "$ENV_FILE")
+        _grist_iev=$(read_env_var GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED "$ENV_FILE")
+        [[ -n "$_grist_iev" ]] && GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED="$_grist_iev"
+        _grist_def=$(read_env_var GRIST_DEFAULT_EMAIL "$ENV_FILE")
+        [[ -n "$_grist_def" ]] && GRIST_ADMIN_EMAIL="$_grist_def"
         if [[ -z "$POSTGRES_KEYCLOAK_PASSWORD" ]]; then
             log_error "В $ENV_FILE нет POSTGRES_KEYCLOAK_PASSWORD, а файл существует. Исправьте .env или удалите том БД."
             exit 1
@@ -420,8 +433,11 @@ GRIST_OIDC_CLIENT_SECRET=$GRIST_OIDC_CLIENT_SECRET
 
 # Grist
 GRIST_ORG=$GRIST_ORG
-GRIST_INITIAL_ADMIN_EMAIL=$GRIST_ADMIN_EMAIL
+# В Grist используется именно GRIST_DEFAULT_EMAIL (владелец инстанса и single-org при GRIST_SINGLE_ORG)
+GRIST_DEFAULT_EMAIL=$GRIST_ADMIN_EMAIL
 GRIST_API_KEY=$GRIST_API_KEY
+# true — не требовать email_verified от Keycloak (иначе Grist: «verify your email»)
+GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED=$GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED
 
 # Email/SMTP
 EMAIL_HOST=$EMAIL_HOST
@@ -525,8 +541,9 @@ services:
       GRIST_OIDC_IDP_CLIENT_SECRET: ${GRIST_OIDC_CLIENT_SECRET}
       GRIST_FORCE_LOGIN: "true"
       GRIST_ANON_PLAYGROUND: "false"
+      GRIST_DEFAULT_EMAIL: ${GRIST_DEFAULT_EMAIL}
       GRIST_SINGLE_ORG: ${GRIST_ORG}
-      GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED: "false"
+      GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED: "${GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED}"
     volumes:
       - grist-data:/persist
     ports:

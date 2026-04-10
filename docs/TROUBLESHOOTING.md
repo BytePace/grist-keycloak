@@ -104,6 +104,37 @@ docker-compose restart grist
 docker logs -f grist-sso-grist
 ```
 
+### Sign-in failed: «Please verify your email with the identity provider»
+
+**Симптомы:** После регистрации или входа через Keycloak Grist показывает сообщение о необходимости подтвердить email, хотя в realm отключена верификация почты.
+
+**Причина:** Это проверка на стороне **Grist**, не Keycloak. Grist по умолчанию требует, чтобы в ответе OIDC userinfo поле `email_verified` было `true`. У новых пользователей Keycloak часто отдаёт `email_verified: false`, пока email не подтверждён через поток Keycloak — независимо от настройки «Verify email» в realm.
+
+**Варианты:**
+
+1. **Рекомендуется для открытой регистрации без писем:** задать для контейнера Grist переменную окружения  
+   `GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED=true`  
+   ([документация Grist OIDC](https://support.getgrist.com/install/oidc/)). В этом репозитории:
+   - добавьте в `/opt/grist-sso/.env` строку `GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED=true` и перегенерируйте `docker-compose.yml` через `deploy.sh`, **или**
+   - при следующем деплое: `sudo ./deploy.sh ... --ignore-email-verified`  
+   Затем: `cd /opt/grist-sso && docker compose --env-file .env up -d grist`
+
+2. **Строже по безопасности:** оставить проверку и в Keycloak для пользователя включить **Email verified** (Users → пользователь → Details) или включить подтверждение email в realm.
+
+### Access denied: «You do not have access to this organization's documents»
+
+**Симптомы:** Пользователь успешно вошёл через OIDC (Keycloak), но на `/o/<slug>/` Grist пишет, что нет доступа к документам организации.
+
+**Причина:** **Аутентификация** (кто вы — Keycloak) и **авторизация** (членство в team site / organization в Grist) — разные вещи. При `GRIST_SINGLE_ORG` новые учётки **не добавляются в команду автоматически**: их нужно пригласить или добавить как участников team site. Отдельно: в контейнер Grist должна быть передана **`GRIST_DEFAULT_EMAIL`** — email владельца инстанса и создателя single-org ([Self-managed Grist](https://support.getgrist.com/self-managed/)); в свежих версиях `deploy.sh` она задаётся из email администратора деплоя.
+
+**Что сделать:**
+
+1. Зайти под **администратором Grist** (тот же email, что в `GRIST_DEFAULT_EMAIL` / `GRIST_ADMIN_EMAIL` при деплое) → открыть организацию → **Manage Team** / управление командой → **пригласить** пользователей по email или добавить уже существующих пользователей сайта. Подробнее: [Team sharing](https://support.getgrist.com/team-sharing/).
+
+2. Убедиться, что в `docker-compose` у сервиса `grist` есть `GRIST_DEFAULT_EMAIL` и `GRIST_SINGLE_ORG`, перезапустить контейнер после правок.
+
+3. Полностью автоматического «все пользователи Keycloak сразу members» в типичной конфигурации Grist CE нет; для массового провижининга смотрите **SCIM** и документацию вашей редакции Grist.
+
 ### Login redirects to Keycloak but fails
 
 **Симптомы:**
@@ -129,6 +160,24 @@ docker logs grist-sso-grist | grep -i "oidc\|callback"
 # Clients → grist-client → Valid Redirect URIs
 # Должна содержать: https://grist.example.com/oauth2/callback
 ```
+
+### Sign out из Grist: Keycloak «Invalid redirect uri» на logout
+
+**Симптомы:** При выходе из Grist открывается  
+`/realms/grist/protocol/openid-connect/logout?post_logout_redirect_uri=https://grist…/signed-out&…`  
+и Keycloak показывает **Invalid redirect uri**.
+
+**Причина:** с Keycloak 18+ для параметра `post_logout_redirect_uri` действует отдельный список — **Valid post logout redirect URIs** / атрибут клиента `post.logout.redirect.uris`. Обычных **Valid Redirect URIs** (например `/oauth2/callback`) для выхода недостаточно.
+
+**Решение:**
+
+1. **Через Admin Console:** Realm **grist** → **Clients** → **grist-client** → вкладка **Settings** / **Logout** (зависит от версии) → в **Valid post logout redirect URIs** добавьте точно:  
+   `https://<GRIST_DOMAIN>/signed-out`  
+   (для `grist.bytepace.com` это `https://grist.bytepace.com/signed-out`). Сохраните.
+
+2. **Через обновлённый `scripts/keycloak-realm-setup.sh`:** при следующем прогоне деплоя скрипт выставляет `post.logout.redirect.uris` для клиента автоматически. Либо выполните скрипт вручную с экспортом `GRIST_DOMAIN` и `AUTH_DOMAIN`, как при установке.
+
+**Обходной путь на стороне Grist:** переменная `GRIST_OIDC_IDP_SKIP_END_SESSION_ENDPOINT=true` отключает редирект на logout IdP (сессия Keycloak может остаться активной) — предпочтительнее исправить клиент в Keycloak.
 
 ### OIDC Configuration Error
 
