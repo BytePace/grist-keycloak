@@ -51,22 +51,38 @@ log_error() {
 get_admin_token() {
     log_info "Получение admin token из Keycloak..."
 
-    local response=$(curl -s -X POST \
-        "$KEYCLOAK_URL/realms/master/protocol/openid-connect/token" \
-        -H "Content-Type: application/x-www-form-urlencoded" \
-        -d "grant_type=password" \
-        -d "client_id=admin-cli" \
-        -d "username=$KEYCLOAK_ADMIN" \
-        -d "password=$KEYCLOAK_ADMIN_PASSWORD")
+    # После свежего старта Keycloak может логировать "started", но bootstrap-admin
+    # ещё не готов — token endpoint временно отвечает invalid_grant.
+    local max_attempts=30
+    local attempt=0
+    local response token err
 
-    local token=$(echo "$response" | jq -r '.access_token // empty')
+    while [[ $attempt -lt $max_attempts ]]; do
+        response=$(curl -s -X POST \
+            "$KEYCLOAK_URL/realms/master/protocol/openid-connect/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "grant_type=password" \
+            -d "client_id=admin-cli" \
+            -d "username=$KEYCLOAK_ADMIN" \
+            -d "password=$KEYCLOAK_ADMIN_PASSWORD")
 
-    if [[ -z "$token" ]]; then
-        echo "Ответ Keycloak: $response" >&2
-        log_error "Не удалось получить admin token"
-    fi
+        token=$(echo "$response" | jq -r '.access_token // empty' 2>/dev/null || true)
+        if [[ -n "$token" ]]; then
+            echo "$token"
+            return 0
+        fi
 
-    echo "$token"
+        err=$(echo "$response" | jq -r '.error_description // .error // empty' 2>/dev/null || true)
+        attempt=$((attempt + 1))
+        if [[ $attempt -lt $max_attempts ]]; then
+            log_warning "Token ещё не получен (попытка $attempt/$max_attempts): ${err:-unknown error}. Повтор через 2s..."
+            sleep 2
+            continue
+        fi
+    done
+
+    echo "Ответ Keycloak: $response" >&2
+    log_error "Не удалось получить admin token"
 }
 
 ################################################################################
