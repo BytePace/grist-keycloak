@@ -58,6 +58,8 @@ CERTBOT_EMAIL=""
 KEYCLOAK_VERSION="24.0"
 GRIST_VERSION="latest"
 POSTGRES_VERSION="15-alpine"
+# Общий realm Keycloak с OnlyOffice и др. (issuer: .../realms/$KEYCLOAK_REALM)
+KEYCLOAK_REALM="ssa"
 
 ################################################################################
 # Функции логирования
@@ -482,6 +484,8 @@ generate_secrets() {
         [[ -n "$_grist_po" ]] && GRIST_PERSONAL_ORGS="$_grist_po"
         _grist_oca=$(read_env_var GRIST_ORG_CREATION_ANYONE "$ENV_FILE")
         [[ -n "$_grist_oca" ]] && GRIST_ORG_CREATION_ANYONE="$_grist_oca"
+        _kc_realm=$(read_env_var KEYCLOAK_REALM "$ENV_FILE")
+        [[ -n "$_kc_realm" ]] && KEYCLOAK_REALM="$_kc_realm"
         if [[ -z "$POSTGRES_KEYCLOAK_PASSWORD" ]]; then
             log_error "В $ENV_FILE нет POSTGRES_KEYCLOAK_PASSWORD, а файл существует. Исправьте .env или удалите том БД."
             exit 1
@@ -554,7 +558,7 @@ AUTH_DOMAIN=$AUTH_DOMAIN
 GRIST_DOMAIN=$GRIST_DOMAIN
 
 # Keycloak
-KEYCLOAK_REALM=grist
+KEYCLOAK_REALM=$KEYCLOAK_REALM
 KEYCLOAK_ADMIN_PASSWORD=$KEYCLOAK_ADMIN_PASSWORD
 
 # PostgreSQL
@@ -847,6 +851,7 @@ setup_keycloak_realm() {
     export GRIST_OIDC_CLIENT_SECRET_FILE="/tmp/grist-client-secret.txt"
     export GRIST_MOBILE_OIDC_CLIENT_ID
     export GRIST_MOBILE_OIDC_REDIRECT_URI
+    export KEYCLOAK_REALM
 
     if [[ "$VERBOSE" == true ]]; then
         log_verbose "Setting up Keycloak realm with these environment variables:"
@@ -860,6 +865,7 @@ setup_keycloak_realm() {
         log_verbose "  GRIST_OIDC_CLIENT_SECRET_FILE: $GRIST_OIDC_CLIENT_SECRET_FILE"
         log_verbose "  GRIST_MOBILE_OIDC_CLIENT_ID: $GRIST_MOBILE_OIDC_CLIENT_ID"
         log_verbose "  GRIST_MOBILE_OIDC_REDIRECT_URI: $GRIST_MOBILE_OIDC_REDIRECT_URI"
+        log_verbose "  KEYCLOAK_REALM: $KEYCLOAK_REALM"
         log_verbose "Script location: $SCRIPT_DIR/scripts/keycloak-realm-setup.sh"
     fi
 
@@ -999,6 +1005,7 @@ run_tests() {
     export AUTH_DOMAIN
     export GRIST_DOMAIN
     export DEPLOY_DIR
+    export KEYCLOAK_REALM
 
     if bash "$SCRIPT_DIR/scripts/test-deployment.sh"; then
         log_success "Все тесты пройдены"
@@ -1021,7 +1028,7 @@ output_credentials() {
 {
   "grist_api_url": "https://$GRIST_DOMAIN",
   "auth_type": "oidc",
-  "oidc_issuer": "https://$AUTH_DOMAIN/realms/grist",
+  "oidc_issuer": "https://$AUTH_DOMAIN/realms/$KEYCLOAK_REALM",
   "client_id": "$GRIST_MOBILE_OIDC_CLIENT_ID",
   "redirect_uri": "$GRIST_MOBILE_OIDC_REDIRECT_URI"
 }
@@ -1033,7 +1040,7 @@ EOF
   "grist_api_url": "https://$GRIST_DOMAIN",
   "grist_org": "$GRIST_ORG",
   "auth_type": "oidc",
-  "oidc_issuer": "https://$AUTH_DOMAIN/realms/grist",
+  "oidc_issuer": "https://$AUTH_DOMAIN/realms/$KEYCLOAK_REALM",
   "client_id": "$GRIST_MOBILE_OIDC_CLIENT_ID",
   "redirect_uri": "$GRIST_MOBILE_OIDC_REDIRECT_URI"
 }
@@ -1061,14 +1068,14 @@ Password: $KEYCLOAK_ADMIN_PASSWORD
 ────────────────────────────────────────────────────────────────────────────
 Client ID: grist-client
 Client Secret: $GRIST_OIDC_CLIENT_SECRET
-Issuer: https://$AUTH_DOMAIN/realms/grist
+Issuer: https://$AUTH_DOMAIN/realms/$KEYCLOAK_REALM
 Redirect URI (Grist web): https://$GRIST_DOMAIN/oauth2/callback
 
 📱 OIDC — нативное приложение (public client + PKCE, без секрета)
 ────────────────────────────────────────────────────────────────────────────
 Client ID: $GRIST_MOBILE_OIDC_CLIENT_ID
 Redirect URI: $GRIST_MOBILE_OIDC_REDIRECT_URI
-Issuer: https://$AUTH_DOMAIN/realms/grist
+Issuer: https://$AUTH_DOMAIN/realms/$KEYCLOAK_REALM
 
 🔐 POSTGRESQL CREDENTIALS
 ────────────────────────────────────────────────────────────────────────────
@@ -1154,7 +1161,7 @@ grist-client с секретом используется только конт�
 ================================================================================
 
 1. Create users in Keycloak Admin Panel:
-   https://$AUTH_DOMAIN → Realm: grist → Users → Create user
+   https://$AUTH_DOMAIN → Realm: $KEYCLOAK_REALM → Users → Create user
 
 2. Create a test user:
    Email: test@example.com
