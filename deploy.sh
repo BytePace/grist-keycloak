@@ -1367,10 +1367,13 @@ rollback_deployment() {
     # Удаление volumes если указано
     if [[ "$KEEP_DATA" == false ]]; then
         log_warning "Удаление всех данных БД и файлов Grist..."
-        # Try to remove volumes with project name prefix (most common case)
-        docker volume rm grist-sso_keycloak-db-data grist-sso_grist-data 2>/dev/null || true
-        # Also try without prefix in case volumes were created differently
-        docker volume rm keycloak-db-data grist-data 2>/dev/null || true
+        # Remove all grist-sso related volumes
+        local vols
+        vols=$(docker volume ls -q 2>/dev/null | grep -E 'grist.*data|keycloak.*data' || true)
+        while IFS= read -r vol; do
+            [[ -z "$vol" ]] && continue
+            docker volume rm "$vol" 2>/dev/null || true
+        done <<< "$vols"
         log_warning "⚠️  НЕВОЗМОЖНО ВОССТАНОВИТЬ"
     else
         log_info "БД и данные Grist сохранены"
