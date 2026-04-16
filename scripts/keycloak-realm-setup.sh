@@ -228,10 +228,12 @@ create_oidc_client() {
             "serviceAccountsEnabled": false,
             "authorizationServicesEnabled": false,
             "redirectUris": [
-                "https://'$GRIST_DOMAIN'/oauth2/callback"
+                "https://'$GRIST_DOMAIN'/oauth2/callback",
+                "http://localhost:3000/oauth2/callback"
             ],
             "webOrigins": [
-                "https://'$GRIST_DOMAIN'"
+                "https://'$GRIST_DOMAIN'",
+                "http://localhost:3000"
             ],
             "rootUrl": "https://'$GRIST_DOMAIN'",
             "baseUrl": "https://'$GRIST_DOMAIN'",
@@ -268,6 +270,8 @@ create_oidc_client() {
             -H "Authorization: Bearer $token" | jq -r '.[0].id // empty')
         if [[ -n "$client_id" ]]; then
             log_success "Используется существующий OIDC client (ID: $client_id)"
+            # Обновить redirectUris и webOrigins для существующего клиента
+            update_oidc_client_uris "$token" "$client_id"
             echo "$client_id"
             return
         fi
@@ -279,6 +283,50 @@ create_oidc_client() {
         log_error "Ошибка при создании client: $err_txt"
     fi
     log_error "Не удалось создать client (нет id в ответе)"
+}
+
+################################################################################
+# Обновление redirect URIs для существующего OIDC client
+################################################################################
+
+update_oidc_client_uris() {
+    local token="$1"
+    local client_id="$2"
+
+    log_info "Обновление redirectUris и webOrigins для grist-client..."
+
+    local current tmp http_code
+    current=$(curl -sS -X GET \
+        "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/clients/$client_id" \
+        -H "Authorization: Bearer $token")
+
+    tmp=$(mktemp)
+    echo "$current" | jq \
+        --arg domain "$GRIST_DOMAIN" '{
+            redirectUris: [
+                ("https://" + $domain + "/oauth2/callback"),
+                "http://localhost:3000/oauth2/callback"
+            ],
+            webOrigins: [
+                ("https://" + $domain),
+                "http://localhost:3000"
+            ]
+        } as $new_uris |
+        .redirectUris = $new_uris.redirectUris |
+        .webOrigins = $new_uris.webOrigins' > "$tmp"
+
+    http_code=$(curl -sS -o /dev/null -w "%{http_code}" -X PUT \
+        "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/clients/$client_id" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json; charset=UTF-8" \
+        -d @"$tmp")
+    rm -f "$tmp"
+
+    if [[ "$http_code" == "204" ]] || [[ "$http_code" == "200" ]]; then
+        log_success "redirectUris обновлены (HTTP $http_code): https://$GRIST_DOMAIN/oauth2/callback и http://localhost:3000/oauth2/callback"
+    else
+        log_warning "Не удалось обновить redirectUris (HTTP $http_code) — проверьте вручную в Keycloak Admin Console"
+    fi
 }
 
 ################################################################################
