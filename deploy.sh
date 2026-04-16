@@ -643,13 +643,13 @@ EOF
 }
 
 ################################################################################
-# Генерация dc.yml
+# Генерация docker-compose.yml
 ################################################################################
 
 create_docker_compose() {
-    log_step "Генерация dc.yml"
+    log_step "Генерация docker-compose.yml"
 
-    local COMPOSE_FILE="$DEPLOY_DIR/dc.yml"
+    local COMPOSE_FILE="$DEPLOY_DIR/docker-compose.yml"
 
     # Копируем из template или создаём встроенный
     cat > "$COMPOSE_FILE" << 'EOF'
@@ -733,7 +733,7 @@ services:
       - keycloak
 EOF
 
-    log_success "dc.yml создан"
+    log_success "docker-compose.yml создан"
 }
 
 ################################################################################
@@ -744,7 +744,7 @@ reset_keycloak_postgres_volume() {
     log_step "Сброс тома PostgreSQL (Keycloak)"
 
     cd "$DEPLOY_DIR" || exit 1
-    if [[ -f dc.yml ]]; then
+    if [[ -f docker-compose.yml ]]; then
         log_info "Остановка контейнеров..."
         dc --env-file .env down 2>/dev/null || true
     fi
@@ -779,7 +779,7 @@ start_containers() {
 
     if [[ "$VERBOSE" == true ]]; then
         log_verbose "Current directory: $(pwd)"
-        log_verbose "Docker compose file: $(pwd)/dc.yml"
+        log_verbose "Docker compose file: $(pwd)/docker-compose.yml"
         log_verbose "Env file: $(pwd)/.env"
         log_verbose "Starting containers with --env-file .env flag"
     fi
