@@ -1348,8 +1348,7 @@ rollback_deployment() {
 
     # Остановка контейнеров
     log_info "Остановка контейнеров..."
-    dc stop 2>/dev/null || true
-    dc rm -f 2>/dev/null || true
+    dc --env-file .env down 2>/dev/null || true
 
     # Удаление Nginx конфигов
     log_info "Удаление Nginx конфигов..."
