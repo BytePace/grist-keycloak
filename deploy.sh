@@ -1350,6 +1350,11 @@ rollback_deployment() {
     log_info "Остановка контейнеров..."
     dc --env-file .env down 2>/dev/null || true
 
+    # Удаление .env и других конфиг-файлов
+    log_info "Удаление конфигурационных файлов..."
+    rm -f "$DEPLOY_DIR/.env" 2>/dev/null || true
+    rm -f "$DEPLOY_DIR/docker-compose.yml" 2>/dev/null || true
+
     # Удаление Nginx конфигов
     log_info "Удаление Nginx конфигов..."
     rm -f /etc/nginx/sites-enabled/*bytepace.com.conf 2>/dev/null || true
