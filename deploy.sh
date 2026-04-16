@@ -62,6 +62,33 @@ POSTGRES_VERSION="15-alpine"
 KEYCLOAK_REALM="ssa"
 
 ################################################################################
+# Docker Compose wrapper — работает с docker compose и dc
+################################################################################
+
+# Определяем какую команду использовать: "docker compose" или "docker-compose"
+_init_docker_compose_cmd() {
+    if docker compose version &> /dev/null 2>&1; then
+        DOCKER_COMPOSE_CMD="docker compose"
+    elif command -v docker-compose &> /dev/null; then
+        DOCKER_COMPOSE_CMD="docker-compose"
+    else
+        echo "Error: Neither 'docker-compose' nor 'docker compose' found" >&2
+        exit 1
+    fi
+}
+
+# Инициализируем переменную при загрузке скрипта
+DOCKER_COMPOSE_CMD=""
+
+# Обертка над docker compose/docker-compose
+dc() {
+    if [[ -z "$DOCKER_COMPOSE_CMD" ]]; then
+        _init_docker_compose_cmd
+    fi
+    $DOCKER_COMPOSE_CMD "$@"
+}
+
+################################################################################
 # Функции логирования
 ################################################################################
 
@@ -121,9 +148,9 @@ check_requirements() {
         fi
     done
 
-    # Проверить docker-compose
-    if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/null; then
-        log_error "docker-compose не установлен"
+    # Проверить docker compose (новый или старый синтаксис)
+    if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/null 2>&1; then
+        log_error "docker-compose не установлен (нужен либо 'docker-compose', либо 'docker compose')"
         exit 1
     fi
 
@@ -456,6 +483,10 @@ generate_secrets() {
     if docker volume ls -q 2>/dev/null | grep -q 'keycloak-db-data'; then
         existing_pg_volume=true
     fi
+    # Also check with project prefix (grist-sso_keycloak-db-data)
+    if docker volume ls -q 2>/dev/null | grep -qE '(keycloak-db-data|.*_keycloak-db-data)'; then
+        existing_pg_volume=true
+    fi
 
     # PostgreSQL хранит пароль только при первом init тома; при повторном запуске скрипта
     # нельзя генерировать новый POSTGRES_KEYCLOAK_PASSWORD, если данные БД уже есть.
@@ -612,13 +643,13 @@ EOF
 }
 
 ################################################################################
-# Генерация docker-compose.yml
+# Генерация dc.yml
 ################################################################################
 
 create_docker_compose() {
-    log_step "Генерация docker-compose.yml"
+    log_step "Генерация dc.yml"
 
-    local COMPOSE_FILE="$DEPLOY_DIR/docker-compose.yml"
+    local COMPOSE_FILE="$DEPLOY_DIR/dc.yml"
 
     # Копируем из template или создаём встроенный
     cat > "$COMPOSE_FILE" << 'EOF'
@@ -702,7 +733,7 @@ services:
       - keycloak
 EOF
 
-    log_success "docker-compose.yml создан"
+    log_success "dc.yml создан"
 }
 
 ################################################################################
@@ -713,9 +744,9 @@ reset_keycloak_postgres_volume() {
     log_step "Сброс тома PostgreSQL (Keycloak)"
 
     cd "$DEPLOY_DIR" || exit 1
-    if [[ -f docker-compose.yml ]]; then
+    if [[ -f dc.yml ]]; then
         log_info "Остановка контейнеров..."
-        docker-compose --env-file .env down 2>/dev/null || docker-compose down 2>/dev/null || true
+        dc --env-file .env down 2>/dev/null || true
     fi
 
     local vols
@@ -729,7 +760,7 @@ reset_keycloak_postgres_volume() {
         [[ -z "$vol" ]] && continue
         log_warning "Удаление тома: $vol"
         if ! docker volume rm "$vol" 2>/dev/null; then
-            log_error "Не удалось удалить $vol — остановите контейнеры: docker-compose --env-file .env down"
+            log_error "Не удалось удалить $vol — остановите контейнеры: dc --env-file .env down"
             exit 1
         fi
     done <<< "$vols"
@@ -748,7 +779,7 @@ start_containers() {
 
     if [[ "$VERBOSE" == true ]]; then
         log_verbose "Current directory: $(pwd)"
-        log_verbose "Docker compose file: $(pwd)/docker-compose.yml"
+        log_verbose "Docker compose file: $(pwd)/dc.yml"
         log_verbose "Env file: $(pwd)/.env"
         log_verbose "Starting containers with --env-file .env flag"
     fi
@@ -756,15 +787,15 @@ start_containers() {
     log_info "Запуск PostgreSQL и Keycloak..."
 
     if [[ "$VERBOSE" == true ]]; then
-        log_verbose "Running: docker-compose --env-file .env up -d postgres-keycloak keycloak"
+        log_verbose "Running: dc --env-file .env up -d postgres-keycloak keycloak"
     fi
 
-    docker-compose --env-file .env up -d postgres-keycloak keycloak
+    dc --env-file .env up -d postgres-keycloak keycloak
 
     if [[ "$VERBOSE" == true ]]; then
         log_verbose "Containers started, waiting for Keycloak to be ready..."
         log_verbose "Checking logs..."
-        docker-compose logs keycloak 2>/dev/null | tail -5 | while read line; do
+        dc logs keycloak 2>/dev/null | tail -5 | while read line; do
             log_verbose "  $line"
         done
     fi
@@ -774,7 +805,7 @@ start_containers() {
     local attempt=0
 
     while [ $attempt -lt $max_attempts ]; do
-        if docker-compose logs keycloak 2>/dev/null | grep -q "Running the server\|started in"; then
+        if dc logs keycloak 2>/dev/null | grep -q "Running the server\|started in"; then
             log_success "Keycloak готов"
             if [[ "$VERBOSE" == true ]]; then
                 log_verbose "Keycloak startup successful after $((attempt * 5)) seconds"
@@ -785,7 +816,7 @@ start_containers() {
         attempt=$((attempt + 1))
         if [[ "$VERBOSE" == true && $((attempt % 3)) == 0 ]]; then
             log_verbose "Attempt $attempt/60... checking logs"
-            docker-compose logs keycloak 2>/dev/null | tail -2 | while read line; do
+            dc logs keycloak 2>/dev/null | tail -2 | while read line; do
                 log_verbose "  $line"
             done
         fi
@@ -795,18 +826,18 @@ start_containers() {
 
     if [ $attempt -eq $max_attempts ]; then
         log_warning "Keycloak не стартовал за 5 минут"
-        log_info "Проверьте логи: docker-compose logs keycloak"
+        log_info "Проверьте логи: dc logs keycloak"
         if [[ "$VERBOSE" == true ]]; then
             log_verbose "Full Keycloak logs:"
-            docker-compose logs keycloak | tail -50 | while read line; do
+            dc logs keycloak | tail -50 | while read line; do
                 log_verbose "  $line"
             done
         fi
-        if docker-compose logs keycloak 2>/dev/null | grep -q 'password authentication failed'; then
+        if dc logs keycloak 2>/dev/null | grep -q 'password authentication failed'; then
             log_error "PostgreSQL отклоняет пароль пользователя keycloak: пароль в .env не совпадает с тем, что был при первом init тома."
             log_info "Повторите деплой с удалением тома и тем же .env (данные БД Keycloak будут сброшены):"
             log_info "  sudo $SCRIPT_DIR/deploy.sh ... --reset-postgres-volume"
-            log_info "или вручную: cd $DEPLOY_DIR && docker-compose --env-file .env down && docker volume rm \$(docker volume ls -q | grep keycloak-db-data)"
+            log_info "или вручную: cd $DEPLOY_DIR && dc --env-file .env down && docker volume rm \$(docker volume ls -q | grep keycloak-db-data)"
         fi
         log_error "Развертывание прервано: Keycloak не готов"
         exit 1
@@ -815,14 +846,14 @@ start_containers() {
     log_info "Запуск Grist..."
 
     if [[ "$VERBOSE" == true ]]; then
-        log_verbose "Running: docker-compose --env-file .env up -d grist"
+        log_verbose "Running: dc --env-file .env up -d grist"
     fi
 
-    docker-compose --env-file .env up -d grist
+    dc --env-file .env up -d grist
 
     if [[ "$VERBOSE" == true ]]; then
         log_verbose "Checking container status:"
-        docker-compose ps | while read line; do
+        dc ps | while read line; do
             log_verbose "  $line"
         done
     fi
@@ -912,16 +943,16 @@ setup_keycloak_realm() {
             log_info "Перезагрузка Grist с новой конфигурацией OIDC..."
 
             if [[ "$VERBOSE" == true ]]; then
-                log_verbose "Running: docker-compose down grist"
+                log_verbose "Running: dc down grist"
             fi
 
-            docker-compose --env-file .env down grist
+            dc --env-file .env down grist
 
             if [[ "$VERBOSE" == true ]]; then
-                log_verbose "Running: docker-compose --env-file .env up -d grist"
+                log_verbose "Running: dc --env-file .env up -d grist"
             fi
 
-            docker-compose --env-file .env up -d grist
+            dc --env-file .env up -d grist
 
             log_info "Ожидание Grist (максимум 2 минуты)..."
             local max_attempts=24
@@ -944,10 +975,10 @@ setup_keycloak_realm() {
             done
 
             if [ $attempt -eq $max_attempts ]; then
-                log_warning "Grist может не запуститься сразу, проверьте логи: docker-compose logs grist"
+                log_warning "Grist может не запуститься сразу, проверьте логи: dc logs grist"
                 if [[ "$VERBOSE" == true ]]; then
                     log_verbose "Grist startup timeout, showing last 20 lines of logs:"
-                    docker-compose logs grist | tail -20 | while read line; do
+                    dc logs grist | tail -20 | while read line; do
                         log_verbose "  $line"
                     done
                 fi
@@ -1181,8 +1212,8 @@ grist-client с секретом используется только конт�
 ================================================================================
 
 Check the logs:
-  docker-compose logs keycloak
-  docker-compose logs grist
+  dc logs keycloak
+  dc logs grist
   tail -f /tmp/grist-keycloak-deploy.log
 
 Run diagnostics:
@@ -1317,8 +1348,8 @@ rollback_deployment() {
 
     # Остановка контейнеров
     log_info "Остановка контейнеров..."
-    docker-compose stop 2>/dev/null || true
-    docker-compose rm -f 2>/dev/null || true
+    dc stop 2>/dev/null || true
+    dc rm -f 2>/dev/null || true
 
     # Удаление Nginx конфигов
     log_info "Удаление Nginx конфигов..."
@@ -1337,7 +1368,10 @@ rollback_deployment() {
     # Удаление volumes если указано
     if [[ "$KEEP_DATA" == false ]]; then
         log_warning "Удаление всех данных БД и файлов Grist..."
+        # Try to remove volumes with project name prefix (most common case)
         docker volume rm grist-sso_keycloak-db-data grist-sso_grist-data 2>/dev/null || true
+        # Also try without prefix in case volumes were created differently
+        docker volume rm keycloak-db-data grist-data 2>/dev/null || true
         log_warning "⚠️  НЕВОЗМОЖНО ВОССТАНОВИТЬ"
     else
         log_info "БД и данные Grist сохранены"
