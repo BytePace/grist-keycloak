@@ -88,6 +88,14 @@ log_verbose() {
     fi
 }
 
+docker_compose() {
+    if command -v docker-compose &> /dev/null; then
+        docker-compose "$@"
+    else
+        docker compose "$@"
+    fi
+}
+
 ################################################################################
 # Проверка requirements
 ################################################################################
@@ -268,8 +276,8 @@ print_usage() {
   --reset-postgres-volume         Удалить Docker-том БД Keycloak перед деплоем (после
                                   смены пароля в .env без совпадения с данными в томе;
                                   данные realm в Postgres будут потеряны)
-  --setup-nginx                   После деплоя установить конфиг nginx (нужны
-                                  сертификаты certbot для AUTH_DOMAIN и GRIST_DOMAIN)
+  --setup-nginx                   После деплоя установить nginx/certbot, выпустить
+                                  Let's Encrypt сертификаты и включить reverse proxy
   --ignore-email-verified         GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED=true: разрешить
                                   вход в Grist без подтверждения email в IdP (Keycloak
                                   часто отдаёт email_verified=false при отключённой верификации)
@@ -700,7 +708,7 @@ reset_keycloak_postgres_volume() {
     cd "$DEPLOY_DIR" || exit 1
     if [[ -f docker-compose.yml ]]; then
         log_info "Остановка контейнеров..."
-        docker-compose --env-file .env down 2>/dev/null || docker-compose down 2>/dev/null || true
+        docker_compose --env-file .env down 2>/dev/null || docker_compose down 2>/dev/null || true
     fi
 
     local vols
@@ -744,12 +752,12 @@ start_containers() {
         log_verbose "Running: docker-compose --env-file .env up -d postgres-keycloak keycloak"
     fi
 
-    docker-compose --env-file .env up -d postgres-keycloak keycloak
+    docker_compose --env-file .env up -d postgres-keycloak keycloak
 
     if [[ "$VERBOSE" == true ]]; then
         log_verbose "Containers started, waiting for Keycloak to be ready..."
         log_verbose "Checking logs..."
-        docker-compose logs keycloak 2>/dev/null | tail -5 | while read line; do
+        docker_compose logs keycloak 2>/dev/null | tail -5 | while read line; do
             log_verbose "  $line"
         done
     fi
@@ -759,7 +767,7 @@ start_containers() {
     local attempt=0
 
     while [ $attempt -lt $max_attempts ]; do
-        if docker-compose logs keycloak 2>/dev/null | grep -q "Running the server\|started in"; then
+        if docker_compose logs keycloak 2>/dev/null | grep -q "Running the server\|started in"; then
             log_success "Keycloak готов"
             if [[ "$VERBOSE" == true ]]; then
                 log_verbose "Keycloak startup successful after $((attempt * 5)) seconds"
@@ -770,7 +778,7 @@ start_containers() {
         attempt=$((attempt + 1))
         if [[ "$VERBOSE" == true && $((attempt % 3)) == 0 ]]; then
             log_verbose "Attempt $attempt/60... checking logs"
-            docker-compose logs keycloak 2>/dev/null | tail -2 | while read line; do
+            docker_compose logs keycloak 2>/dev/null | tail -2 | while read line; do
                 log_verbose "  $line"
             done
         fi
@@ -783,11 +791,11 @@ start_containers() {
         log_info "Проверьте логи: docker-compose logs keycloak"
         if [[ "$VERBOSE" == true ]]; then
             log_verbose "Full Keycloak logs:"
-            docker-compose logs keycloak | tail -50 | while read line; do
+            docker_compose logs keycloak | tail -50 | while read line; do
                 log_verbose "  $line"
             done
         fi
-        if docker-compose logs keycloak 2>/dev/null | grep -q 'password authentication failed'; then
+        if docker_compose logs keycloak 2>/dev/null | grep -q 'password authentication failed'; then
             log_error "PostgreSQL отклоняет пароль пользователя keycloak: пароль в .env не совпадает с тем, что был при первом init тома."
             log_info "Повторите деплой с удалением тома и тем же .env (данные БД Keycloak будут сброшены):"
             log_info "  sudo $SCRIPT_DIR/deploy.sh ... --reset-postgres-volume"
@@ -803,11 +811,11 @@ start_containers() {
         log_verbose "Running: docker-compose --env-file .env up -d grist"
     fi
 
-    docker-compose --env-file .env up -d grist
+    docker_compose --env-file .env up -d grist
 
     if [[ "$VERBOSE" == true ]]; then
         log_verbose "Checking container status:"
-        docker-compose ps | while read line; do
+        docker_compose ps | while read line; do
             log_verbose "  $line"
         done
     fi
@@ -891,16 +899,17 @@ setup_keycloak_realm() {
             log_info "Перезагрузка Grist с новой конфигурацией OIDC..."
 
             if [[ "$VERBOSE" == true ]]; then
-                log_verbose "Running: docker-compose down grist"
+                log_verbose "Running: docker-compose --env-file .env stop grist && rm -f grist"
             fi
 
-            docker-compose --env-file .env down grist
+            docker_compose --env-file .env stop grist
+            docker_compose --env-file .env rm -f grist
 
             if [[ "$VERBOSE" == true ]]; then
                 log_verbose "Running: docker-compose --env-file .env up -d grist"
             fi
 
-            docker-compose --env-file .env up -d grist
+            docker_compose --env-file .env up -d grist
 
             log_info "Ожидание Grist (максимум 2 минуты)..."
             local max_attempts=24
@@ -926,7 +935,7 @@ setup_keycloak_realm() {
                 log_warning "Grist может не запуститься сразу, проверьте логи: docker-compose logs grist"
                 if [[ "$VERBOSE" == true ]]; then
                     log_verbose "Grist startup timeout, showing last 20 lines of logs:"
-                    docker-compose logs grist | tail -20 | while read line; do
+                    docker_compose logs grist | tail -20 | while read line; do
                         log_verbose "  $line"
                     done
                 fi
@@ -951,6 +960,56 @@ setup_keycloak_realm() {
 # nginx reverse proxy (HTTPS → Keycloak / Grist)
 ################################################################################
 
+ensure_nginx_packages() {
+    log_info "Проверка nginx и certbot..."
+
+    if command -v nginx &>/dev/null && command -v certbot &>/dev/null; then
+        log_success "nginx и certbot уже установлены"
+        return 0
+    fi
+
+    if ! command -v apt-get &>/dev/null; then
+        log_error "apt-get не найден. Установите nginx и certbot вручную."
+        return 1
+    fi
+
+    log_info "Установка nginx и certbot..."
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y nginx certbot
+    log_success "nginx и certbot установлены"
+}
+
+certificate_exists() {
+    local domain="$1"
+    [[ -f "/etc/letsencrypt/live/${domain}/fullchain.pem" && -f "/etc/letsencrypt/live/${domain}/privkey.pem" ]]
+}
+
+issue_certificate() {
+    local domain="$1"
+
+    if certificate_exists "$domain"; then
+        log_success "Сертификат Let's Encrypt для $domain уже существует"
+        return 0
+    fi
+
+    log_info "Выпуск Let's Encrypt сертификата для $domain..."
+    systemctl stop nginx 2>/dev/null || true
+    certbot certonly \
+        --standalone \
+        --non-interactive \
+        --agree-tos \
+        --email "$CERTBOT_EMAIL" \
+        -d "$domain"
+    log_success "Сертификат для $domain выпущен"
+}
+
+ensure_ssl_certificates() {
+    log_info "Проверка SSL сертификатов..."
+
+    issue_certificate "$AUTH_DOMAIN"
+    issue_certificate "$GRIST_DOMAIN"
+}
+
 run_nginx_setup() {
     log_step "Настройка nginx reverse proxy"
 
@@ -958,6 +1017,10 @@ run_nginx_setup() {
         log_error "Не найден: $SCRIPT_DIR/scripts/setup-nginx.sh"
         return 1
     fi
+
+    ensure_nginx_packages || return 1
+    ensure_ssl_certificates || return 1
+    systemctl start nginx 2>/dev/null || true
 
     chmod +x "$SCRIPT_DIR/scripts/setup-nginx.sh" 2>/dev/null || true
     if DEPLOY_DIR="$DEPLOY_DIR" bash "$SCRIPT_DIR/scripts/setup-nginx.sh"; then
@@ -1283,12 +1346,17 @@ main() {
 rollback_deployment() {
     log_step "Откатывание развертывания"
 
-    cd "$DEPLOY_DIR" 2>/dev/null || return 1
-
     # Остановка контейнеров
     log_info "Остановка контейнеров..."
-    docker-compose stop 2>/dev/null || true
-    docker-compose rm -f 2>/dev/null || true
+    if [[ -d "$DEPLOY_DIR" && -f "$DEPLOY_DIR/docker-compose.yml" ]]; then
+        (
+            cd "$DEPLOY_DIR"
+            docker_compose --env-file .env down --remove-orphans 2>/dev/null || docker_compose down --remove-orphans 2>/dev/null || true
+        )
+    else
+        log_warning "$DEPLOY_DIR/docker-compose.yml не найден, удаляю контейнеры по именам"
+    fi
+    docker rm -f grist-sso-grist grist-sso-keycloak grist-sso-postgres 2>/dev/null || true
 
     # Удаление Nginx конфигов
     log_info "Удаление Nginx конфигов..."
@@ -1308,6 +1376,8 @@ rollback_deployment() {
     if [[ "$KEEP_DATA" == false ]]; then
         log_warning "Удаление всех данных БД и файлов Grist..."
         docker volume rm grist-sso_keycloak-db-data grist-sso_grist-data 2>/dev/null || true
+        docker volume rm keycloak-db-data grist-data 2>/dev/null || true
+        rm -rf "$DEPLOY_DIR" 2>/dev/null || true
         log_warning "⚠️  НЕВОЗМОЖНО ВОССТАНОВИТЬ"
     else
         log_info "БД и данные Grist сохранены"
