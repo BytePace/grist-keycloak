@@ -51,6 +51,9 @@ GRIST_PERSONAL_ORGS="true"
 GRIST_ORG_CREATION_ANYONE="true"
 # Grist OIDC: по умолчанию требует email_verified=true у IdP; true = не проверять (см. docs/TROUBLESHOOTING.md)
 GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED="false"
+# Нативные приложения: отдельный public client в Keycloak (PKCE), не путать с grist-client (confidential, для Grist)
+GRIST_MOBILE_OIDC_CLIENT_ID="grist-mobile"
+GRIST_MOBILE_OIDC_REDIRECT_URI="com.bytepace.scan-it-to-google-sheets://oauth/callback"
 CERTBOT_EMAIL=""
 KEYCLOAK_VERSION="24.0"
 GRIST_VERSION="latest"
@@ -472,6 +475,10 @@ generate_secrets() {
         GRIST_API_KEY=$(read_env_var GRIST_API_KEY "$ENV_FILE")
         _grist_iev=$(read_env_var GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED "$ENV_FILE")
         [[ -n "$_grist_iev" ]] && GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED="$_grist_iev"
+        _grist_mcid=$(read_env_var GRIST_MOBILE_OIDC_CLIENT_ID "$ENV_FILE")
+        [[ -n "$_grist_mcid" ]] && GRIST_MOBILE_OIDC_CLIENT_ID="$_grist_mcid"
+        _grist_muri=$(read_env_var GRIST_MOBILE_OIDC_REDIRECT_URI "$ENV_FILE")
+        [[ -n "$_grist_muri" ]] && GRIST_MOBILE_OIDC_REDIRECT_URI="$_grist_muri"
         _grist_def=$(read_env_var GRIST_DEFAULT_EMAIL "$ENV_FILE")
         [[ -n "$_grist_def" ]] && GRIST_ADMIN_EMAIL="$_grist_def"
         _keycloak_realm=$(read_env_var KEYCLOAK_REALM "$ENV_FILE")
@@ -564,9 +571,13 @@ KEYCLOAK_ADMIN_PASSWORD=$KEYCLOAK_ADMIN_PASSWORD
 # PostgreSQL
 POSTGRES_KEYCLOAK_PASSWORD=$POSTGRES_KEYCLOAK_PASSWORD
 
-# OIDC Client
+# OIDC Client (confidential — только для контейнера Grist, не для мобильного приложения)
 GRIST_OIDC_CLIENT_ID=grist-client
 GRIST_OIDC_CLIENT_SECRET=$GRIST_OIDC_CLIENT_SECRET
+
+# OIDC: нативные приложения (iOS/Android), public + PKCE в Keycloak; секрет не используется
+GRIST_MOBILE_OIDC_CLIENT_ID=$GRIST_MOBILE_OIDC_CLIENT_ID
+GRIST_MOBILE_OIDC_REDIRECT_URI=$GRIST_MOBILE_OIDC_REDIRECT_URI
 
 # Grist
 GRIST_ORG=$GRIST_ORG
@@ -846,6 +857,8 @@ setup_keycloak_realm() {
     export EMAIL_PASSWORD
     export KEYCLOAK_URL="http://localhost:8090"
     export GRIST_OIDC_CLIENT_SECRET_FILE="/tmp/grist-client-secret.txt"
+    export GRIST_MOBILE_OIDC_CLIENT_ID
+    export GRIST_MOBILE_OIDC_REDIRECT_URI
 
     if [[ "$VERBOSE" == true ]]; then
         log_verbose "Setting up Keycloak realm with these environment variables:"
@@ -857,6 +870,8 @@ setup_keycloak_realm() {
         log_verbose "  EMAIL_PORT: $EMAIL_PORT"
         log_verbose "  EMAIL_USER: $EMAIL_USER"
         log_verbose "  GRIST_OIDC_CLIENT_SECRET_FILE: $GRIST_OIDC_CLIENT_SECRET_FILE"
+        log_verbose "  GRIST_MOBILE_OIDC_CLIENT_ID: $GRIST_MOBILE_OIDC_CLIENT_ID"
+        log_verbose "  GRIST_MOBILE_OIDC_REDIRECT_URI: $GRIST_MOBILE_OIDC_REDIRECT_URI"
         log_verbose "Script location: $SCRIPT_DIR/scripts/keycloak-realm-setup.sh"
     fi
 
@@ -1075,8 +1090,8 @@ output_credentials() {
   "grist_api_url": "https://$GRIST_DOMAIN",
   "auth_type": "oidc",
   "oidc_issuer": "https://$AUTH_DOMAIN/realms/$KEYCLOAK_REALM",
-  "client_id": "grist-client",
-  "redirect_uri": "app://grist-callback"
+  "client_id": "$GRIST_MOBILE_OIDC_CLIENT_ID",
+  "redirect_uri": "$GRIST_MOBILE_OIDC_REDIRECT_URI"
 }
 EOF
 )
@@ -1087,8 +1102,8 @@ EOF
   "grist_org": "$GRIST_ORG",
   "auth_type": "oidc",
   "oidc_issuer": "https://$AUTH_DOMAIN/realms/$KEYCLOAK_REALM",
-  "client_id": "grist-client",
-  "redirect_uri": "app://grist-callback"
+  "client_id": "$GRIST_MOBILE_OIDC_CLIENT_ID",
+  "redirect_uri": "$GRIST_MOBILE_OIDC_REDIRECT_URI"
 }
 EOF
 )
@@ -1110,12 +1125,18 @@ Password: $KEYCLOAK_ADMIN_PASSWORD
 ⚠️  СОХРАНИТЕ ЭТОТ ФАЙЛ В БЕЗОПАСНОМ МЕСТЕ!
 ────────────────────────────────────────────────────────────────────────────
 
-📋 OIDC CLIENT CONFIGURATION
+📋 OIDC — сервер Grist (confidential client)
 ────────────────────────────────────────────────────────────────────────────
 Client ID: grist-client
 Client Secret: $GRIST_OIDC_CLIENT_SECRET
 Issuer: https://$AUTH_DOMAIN/realms/$KEYCLOAK_REALM
-Redirect URI: https://$GRIST_DOMAIN/oauth2/callback
+Redirect URI (Grist web): https://$GRIST_DOMAIN/oauth2/callback
+
+📱 OIDC — нативное приложение (public client + PKCE, без секрета)
+────────────────────────────────────────────────────────────────────────────
+Client ID: $GRIST_MOBILE_OIDC_CLIENT_ID
+Redirect URI: $GRIST_MOBILE_OIDC_REDIRECT_URI
+Issuer: https://$AUTH_DOMAIN/realms/$KEYCLOAK_REALM
 
 🔐 POSTGRESQL CREDENTIALS
 ────────────────────────────────────────────────────────────────────────────
@@ -1167,11 +1188,13 @@ Grist Application:
 📱 iOS/ANDROID INTEGRATION
 ================================================================================
 
-Use this configuration in your mobile app:
+Use this configuration in your mobile app (Keycloak client '$GRIST_MOBILE_OIDC_CLIENT_ID', not grist-client):
 
 $integration_json
 
 $(if [[ "$WANT_SINGLE_ORG" == true ]]; then echo "Note: GRIST_SINGLE_ORG включён, поэтому grist_org в URL/конфиге приложения обычно не требуется."; else echo "Note: GRIST_SINGLE_ORG выключен (multi-org), поэтому приложению нужен grist_org (slug) для выбора team site."; fi)
+
+grist-client with client secret is only for Grist server container; mobile app uses PKCE with client_id '$GRIST_MOBILE_OIDC_CLIENT_ID'.
 
 ================================================================================
 🔐 SECURITY NOTES
