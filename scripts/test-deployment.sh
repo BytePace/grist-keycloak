@@ -17,6 +17,7 @@ NC='\033[0m'
 # Параметры
 AUTH_DOMAIN="${AUTH_DOMAIN}"
 GRIST_DOMAIN="${GRIST_DOMAIN}"
+KEYCLOAK_REALM="${KEYCLOAK_REALM:-ssa}"
 DEPLOY_DIR="${DEPLOY_DIR:-.}"
 
 # Результаты
@@ -147,7 +148,7 @@ test_grist_https() {
 test_oidc_discovery() {
     log_test "Проверка OIDC Discovery Endpoint"
 
-    local endpoint="https://$AUTH_DOMAIN/realms/grist/.well-known/openid-configuration"
+    local endpoint="https://$AUTH_DOMAIN/realms/$KEYCLOAK_REALM/.well-known/openid-configuration"
     log_info "Проверка: $endpoint"
 
     if curl -s -k "$endpoint" | jq -e '.issuer' > /dev/null 2>&1; then
@@ -206,7 +207,7 @@ test_email_config() {
     log_info "Проверка SMTP configuration в Keycloak..."
 
     # Получить realm config из Keycloak
-    local realm_config=$(curl -s -k "https://$AUTH_DOMAIN/admin/realms/grist" \
+    local realm_config=$(curl -s -k "https://$AUTH_DOMAIN/admin/realms/$KEYCLOAK_REALM" \
         -H "Accept: application/json" 2>/dev/null || echo "{}")
 
     if echo "$realm_config" | jq -e '.smtpServer' > /dev/null 2>&1; then

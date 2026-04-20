@@ -55,6 +55,7 @@ CERTBOT_EMAIL=""
 KEYCLOAK_VERSION="24.0"
 GRIST_VERSION="latest"
 POSTGRES_VERSION="15-alpine"
+KEYCLOAK_REALM="ssa"
 
 ################################################################################
 # Функции логирования
@@ -473,6 +474,8 @@ generate_secrets() {
         [[ -n "$_grist_iev" ]] && GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED="$_grist_iev"
         _grist_def=$(read_env_var GRIST_DEFAULT_EMAIL "$ENV_FILE")
         [[ -n "$_grist_def" ]] && GRIST_ADMIN_EMAIL="$_grist_def"
+        _keycloak_realm=$(read_env_var KEYCLOAK_REALM "$ENV_FILE")
+        [[ -n "$_keycloak_realm" ]] && KEYCLOAK_REALM="$_keycloak_realm"
         _grist_org=$(read_env_var GRIST_ORG "$ENV_FILE")
         [[ -n "$_grist_org" ]] && GRIST_ORG="$_grist_org"
         _grist_so=$(read_env_var GRIST_SINGLE_ORG "$ENV_FILE")
@@ -555,7 +558,7 @@ AUTH_DOMAIN=$AUTH_DOMAIN
 GRIST_DOMAIN=$GRIST_DOMAIN
 
 # Keycloak
-KEYCLOAK_REALM=grist
+KEYCLOAK_REALM=$KEYCLOAK_REALM
 KEYCLOAK_ADMIN_PASSWORD=$KEYCLOAK_ADMIN_PASSWORD
 
 # PostgreSQL
@@ -834,6 +837,7 @@ setup_keycloak_realm() {
 
     # Убедиться что переменные окружения установлены
     export KEYCLOAK_ADMIN_PASSWORD
+    export KEYCLOAK_REALM
     export GRIST_DOMAIN
     export AUTH_DOMAIN
     export EMAIL_HOST
@@ -1046,6 +1050,7 @@ run_tests() {
     # Экспортировать переменные для скрипта тестирования
     export AUTH_DOMAIN
     export GRIST_DOMAIN
+    export KEYCLOAK_REALM
     export DEPLOY_DIR
 
     if bash "$SCRIPT_DIR/scripts/test-deployment.sh"; then
@@ -1069,7 +1074,7 @@ output_credentials() {
 {
   "grist_api_url": "https://$GRIST_DOMAIN",
   "auth_type": "oidc",
-  "oidc_issuer": "https://$AUTH_DOMAIN/realms/grist",
+  "oidc_issuer": "https://$AUTH_DOMAIN/realms/$KEYCLOAK_REALM",
   "client_id": "grist-client",
   "redirect_uri": "app://grist-callback"
 }
@@ -1081,7 +1086,7 @@ EOF
   "grist_api_url": "https://$GRIST_DOMAIN",
   "grist_org": "$GRIST_ORG",
   "auth_type": "oidc",
-  "oidc_issuer": "https://$AUTH_DOMAIN/realms/grist",
+  "oidc_issuer": "https://$AUTH_DOMAIN/realms/$KEYCLOAK_REALM",
   "client_id": "grist-client",
   "redirect_uri": "app://grist-callback"
 }
@@ -1109,7 +1114,7 @@ Password: $KEYCLOAK_ADMIN_PASSWORD
 ────────────────────────────────────────────────────────────────────────────
 Client ID: grist-client
 Client Secret: $GRIST_OIDC_CLIENT_SECRET
-Issuer: https://$AUTH_DOMAIN/realms/grist
+Issuer: https://$AUTH_DOMAIN/realms/$KEYCLOAK_REALM
 Redirect URI: https://$GRIST_DOMAIN/oauth2/callback
 
 🔐 POSTGRESQL CREDENTIALS
@@ -1194,7 +1199,7 @@ $(if [[ "$WANT_SINGLE_ORG" == true ]]; then echo "Note: GRIST_SINGLE_ORG вкл�
 ================================================================================
 
 1. Create users in Keycloak Admin Panel:
-   https://$AUTH_DOMAIN → Realm: grist → Users → Create user
+   https://$AUTH_DOMAIN → Realm: $KEYCLOAK_REALM → Users → Create user
 
 2. Create a test user:
    Email: test@example.com
@@ -1280,6 +1285,7 @@ main() {
         log_verbose "  EMAIL_HOST: $EMAIL_HOST"
         log_verbose "  GRIST_ADMIN_EMAIL: $GRIST_ADMIN_EMAIL"
         log_verbose "  CERTBOT_EMAIL: $CERTBOT_EMAIL"
+        log_verbose "  KEYCLOAK_REALM: $KEYCLOAK_REALM"
         log_verbose "  ROLLBACK_MODE: $ROLLBACK_MODE"
         log_verbose "  KEEP_DATA: $KEEP_DATA"
         log_verbose "  RESET_POSTGRES_VOLUME: $RESET_POSTGRES_VOLUME"

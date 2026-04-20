@@ -2,7 +2,7 @@
 
 ################################################################################
 # Keycloak Realm и OIDC Client Setup
-# Создание realm "grist" и OIDC client "grist-client" через Admin API
+# Создание Keycloak realm и OIDC client "grist-client" через Admin API
 ################################################################################
 
 set -euo pipefail
@@ -18,6 +18,7 @@ NC='\033[0m'
 KEYCLOAK_ADMIN="${KEYCLOAK_ADMIN:-admin}"
 KEYCLOAK_ADMIN_PASSWORD="${KEYCLOAK_ADMIN_PASSWORD}"
 KEYCLOAK_URL="${KEYCLOAK_URL:-http://grist-sso-keycloak:8080}"
+KEYCLOAK_REALM="${KEYCLOAK_REALM:-ssa}"
 GRIST_DOMAIN="${GRIST_DOMAIN}"
 AUTH_DOMAIN="${AUTH_DOMAIN}"
 GRIST_OIDC_CLIENT_SECRET_FILE="${GRIST_OIDC_CLIENT_SECRET_FILE:-/tmp/grist-client-secret.txt}"
@@ -63,8 +64,8 @@ get_admin_token() {
             -H "Content-Type: application/x-www-form-urlencoded" \
             -d "grant_type=password" \
             -d "client_id=admin-cli" \
-            -d "username=$KEYCLOAK_ADMIN" \
-            -d "password=$KEYCLOAK_ADMIN_PASSWORD")
+            --data-urlencode "username=$KEYCLOAK_ADMIN" \
+            --data-urlencode "password=$KEYCLOAK_ADMIN_PASSWORD")
 
         token=$(echo "$response" | jq -r '.access_token // empty' 2>/dev/null || true)
         if [[ -n "$token" ]]; then
@@ -93,10 +94,10 @@ get_admin_token() {
 # скрипт ошибочно считал успех; плюс jq безопасно кодирует пароль.
 update_realm_smtp() {
     local token="$1"
-    log_info "Настройка SMTP для realm 'grist'..."
+    log_info "Настройка SMTP для realm '$KEYCLOAK_REALM'..."
 
     local realm_json merged put_tmp http_code put_body
-    realm_json=$(curl -s -H "Authorization: Bearer $token" "$KEYCLOAK_URL/admin/realms/grist")
+    realm_json=$(curl -s -H "Authorization: Bearer $token" "$KEYCLOAK_URL/admin/realms/$KEYCLOAK_REALM")
     if [[ -z "$realm_json" ]] || ! echo "$realm_json" | jq -e . >/dev/null 2>&1; then
         log_warning "Не удалось прочитать realm для SMTP (пропуск)"
         return 0
@@ -128,7 +129,7 @@ update_realm_smtp() {
 
     put_tmp=$(mktemp)
     http_code=$(curl -sS -o "$put_tmp" -w "%{http_code}" -X PUT \
-        "$KEYCLOAK_URL/admin/realms/grist" \
+        "$KEYCLOAK_URL/admin/realms/$KEYCLOAK_REALM" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json; charset=UTF-8" \
         -d "$merged")
@@ -136,26 +137,29 @@ update_realm_smtp() {
     rm -f "$put_tmp"
 
     if [[ "$http_code" == "204" ]] || [[ "$http_code" == "200" ]]; then
-        log_success "SMTP для realm 'grist' настроен; Verify email включён (verifyEmail=true)"
+        log_success "SMTP для realm '$KEYCLOAK_REALM' настроен; Verify email включён (verifyEmail=true)"
     else
-        log_warning "SMTP не применён (HTTP $http_code). Настройте вручную: Realm grist → Realm settings → Email. Ответ: $put_body"
+        log_warning "SMTP не применён (HTTP $http_code). Настройте вручную: Realm $KEYCLOAK_REALM → Realm settings → Email. Ответ: $put_body"
     fi
 }
 
 create_realm() {
     local token="$1"
 
-    log_info "Создание realm 'grist' (без SMTP в POST — он добавляется отдельно)..."
+    log_info "Создание realm '$KEYCLOAK_REALM' (без SMTP в POST — он добавляется отдельно)..."
 
     # Тело только через jq + --data-binary: многострочный -d в bash иногда даёт Keycloak 400
     # "unable to read contents from stream". refreshTokenLifespan не входит в RealmRepresentation —
     # для SSO idle используем ssoSessionIdleTimeout.
     local payload_file tmp http_code response err_txt verify
     payload_file=$(mktemp)
-    jq -n '{
-        realm: "grist",
+    jq -n \
+        --arg realm "$KEYCLOAK_REALM" \
+        --arg display_name "${KEYCLOAK_REALM^^}" \
+        '{
+        realm: $realm,
         enabled: true,
-        displayName: "Grist",
+        displayName: $display_name,
         loginTheme: "keycloak",
         emailTheme: "keycloak",
         verifyEmail: true,
@@ -177,18 +181,18 @@ create_realm() {
     rm -f "$tmp"
 
     if [[ "$http_code" == "201" ]] || [[ "$http_code" == "204" ]]; then
-        log_success "Realm 'grist' создан (HTTP $http_code)"
+        log_success "Realm '$KEYCLOAK_REALM' создан (HTTP $http_code)"
     elif [[ "$http_code" == "409" ]] || echo "$response" | grep -qi 'exists\|Conflict'; then
-        log_info "Realm 'grist' уже существует (HTTP $http_code)"
+        log_info "Realm '$KEYCLOAK_REALM' уже существует (HTTP $http_code)"
     else
         err_txt=$(echo "$response" | jq -r '.error_description // .errorMessage // .error // empty' 2>/dev/null || true)
         echo "Ответ Keycloak при создании realm (HTTP $http_code): $response" >&2
         log_error "Ошибка при создании realm: ${err_txt:-HTTP $http_code}"
     fi
 
-    verify=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $token" "$KEYCLOAK_URL/admin/realms/grist")
+    verify=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $token" "$KEYCLOAK_URL/admin/realms/$KEYCLOAK_REALM")
     if [[ "$verify" != "200" ]]; then
-        log_error "Realm 'grist' недоступен после POST (GET → HTTP $verify). Проверьте логи Keycloak."
+        log_error "Realm '$KEYCLOAK_REALM' недоступен после POST (GET → HTTP $verify). Проверьте логи Keycloak."
     fi
 
     update_realm_smtp "$token"
@@ -209,7 +213,7 @@ create_oidc_client() {
     hdr=$(mktemp)
     tmp=$(mktemp)
     http_code=$(curl -sS -D "$hdr" -o "$tmp" -w "%{http_code}" -X POST \
-        "$KEYCLOAK_URL/admin/realms/grist/clients" \
+        "$KEYCLOAK_URL/admin/realms/$KEYCLOAK_REALM/clients" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json; charset=UTF-8" \
         -d '{
@@ -246,7 +250,7 @@ create_oidc_client() {
     fi
     if [[ -z "$client_id" ]] && [[ "$http_code" == "201" ]]; then
         client_id=$(curl -s -X GET \
-            "$KEYCLOAK_URL/admin/realms/grist/clients?clientId=grist-client" \
+            "$KEYCLOAK_URL/admin/realms/$KEYCLOAK_REALM/clients?clientId=grist-client" \
             -H "Authorization: Bearer $token" | jq -r '.[0].id // empty')
     fi
 
@@ -259,7 +263,7 @@ create_oidc_client() {
     if [[ "$http_code" == "409" ]] || echo "$response" | grep -qi 'exists\|Conflict'; then
         log_info "OIDC client 'grist-client' уже существует (HTTP $http_code)"
         client_id=$(curl -s -X GET \
-            "$KEYCLOAK_URL/admin/realms/grist/clients?clientId=grist-client" \
+            "$KEYCLOAK_URL/admin/realms/$KEYCLOAK_REALM/clients?clientId=grist-client" \
             -H "Authorization: Bearer $token" | jq -r '.[0].id // empty')
         if [[ -n "$client_id" ]]; then
             log_success "Используется существующий OIDC client (ID: $client_id)"
@@ -295,7 +299,7 @@ ensure_oidc_client_post_logout_redirect() {
 
     local current tmp merged http_code
     current=$(curl -sS -X GET \
-        "$KEYCLOAK_URL/admin/realms/grist/clients/$client_id" \
+        "$KEYCLOAK_URL/admin/realms/$KEYCLOAK_REALM/clients/$client_id" \
         -H "Authorization: Bearer $token")
 
     tmp=$(mktemp)
@@ -313,7 +317,7 @@ ensure_oidc_client_post_logout_redirect() {
     ' > "$tmp"
 
     http_code=$(curl -sS -o /dev/null -w "%{http_code}" -X PUT \
-        "$KEYCLOAK_URL/admin/realms/grist/clients/$client_id" \
+        "$KEYCLOAK_URL/admin/realms/$KEYCLOAK_REALM/clients/$client_id" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json; charset=UTF-8" \
         -d @"$tmp")
@@ -337,7 +341,7 @@ get_client_secret() {
     log_info "Получение client secret..."
 
     local response=$(curl -s -X GET \
-        "$KEYCLOAK_URL/admin/realms/grist/clients/$client_id/client-secret" \
+        "$KEYCLOAK_URL/admin/realms/$KEYCLOAK_REALM/clients/$client_id/client-secret" \
         -H "Authorization: Bearer $token")
 
     local secret=$(echo "$response" | jq -r '.value // empty')
@@ -361,11 +365,11 @@ enable_user_registration() {
     log_info "Включение User Registration в realm (без сброса verifyEmail)..."
 
     local realm_json merged put_tmp http_code put_body
-    realm_json=$(curl -s -H "Authorization: Bearer $token" "$KEYCLOAK_URL/admin/realms/grist")
+    realm_json=$(curl -s -H "Authorization: Bearer $token" "$KEYCLOAK_URL/admin/realms/$KEYCLOAK_REALM")
     if [[ -z "$realm_json" ]] || ! echo "$realm_json" | jq -e . >/dev/null 2>&1; then
         log_warning "Не удалось прочитать realm для registration (пропуск merge)"
         curl -s -X PUT \
-            "$KEYCLOAK_URL/admin/realms/grist" \
+            "$KEYCLOAK_URL/admin/realms/$KEYCLOAK_REALM" \
             -H "Authorization: Bearer $token" \
             -H "Content-Type: application/json" \
             -d '{
@@ -388,7 +392,7 @@ enable_user_registration() {
 
     put_tmp=$(mktemp)
     http_code=$(curl -sS -o "$put_tmp" -w "%{http_code}" -X PUT \
-        "$KEYCLOAK_URL/admin/realms/grist" \
+        "$KEYCLOAK_URL/admin/realms/$KEYCLOAK_REALM" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json; charset=UTF-8" \
         -d "$merged")
@@ -415,7 +419,7 @@ create_test_user() {
 
     # Проверить существование пользователя
     local user_id=$(curl -s -X GET \
-        "$KEYCLOAK_URL/admin/realms/grist/users?email=$email&exact=true" \
+        "$KEYCLOAK_URL/admin/realms/$KEYCLOAK_REALM/users?email=$email&exact=true" \
         -H "Authorization: Bearer $token" | jq -r '.[0].id // empty')
 
     if [[ ! -z "$user_id" ]]; then
@@ -425,7 +429,7 @@ create_test_user() {
 
     # Создать пользователя
     local response=$(curl -s -i -X POST \
-        "$KEYCLOAK_URL/admin/realms/grist/users" \
+        "$KEYCLOAK_URL/admin/realms/$KEYCLOAK_REALM/users" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json" \
         -d '{
