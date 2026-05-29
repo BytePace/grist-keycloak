@@ -161,6 +161,15 @@ docker logs grist-sso-grist | grep -i "oidc\|callback"
 # Должна содержать: https://grist.example.com/oauth2/callback
 ```
 
+### Нативное приложение (iOS/Android): отдельный клиент `grist-mobile`
+
+**Не используйте** `grist-client` в мобильном приложении: это **confidential** client с секретом для контейнера Grist.
+
+Скрипт `scripts/keycloak-realm-setup.sh` создаёт **public** client **`grist-mobile`** с **PKCE (S256)** и redirect вида  
+`com.bytepace.scan-it-to-google-sheets://oauth/callback` (переопределение: `GRIST_MOBILE_OIDC_REDIRECT_URI`).
+
+Проверка в Keycloak: Realm **grist** → **Clients** → **grist-mobile** → **Valid redirect URIs** содержит тот же URI, что в приложении; **Client authentication** = Off; **Proof Key for Code Exchange** = S256.
+
 ### Sign out из Grist: Keycloak «Invalid redirect uri» на logout
 
 **Симптомы:** При выходе из Grist открывается  

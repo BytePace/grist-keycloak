@@ -51,10 +51,42 @@ GRIST_PERSONAL_ORGS="true"
 GRIST_ORG_CREATION_ANYONE="true"
 # Grist OIDC: по умолчанию требует email_verified=true у IdP; true = не проверять (см. docs/TROUBLESHOOTING.md)
 GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED="false"
+# Нативные приложения: отдельный public client в Keycloak (PKCE), не путать с grist-client (confidential, для Grist)
+GRIST_MOBILE_OIDC_CLIENT_ID="grist-mobile"
+GRIST_MOBILE_OIDC_REDIRECT_URI="com.bytepace.scan-it-to-google-sheets://oauth/callback"
 CERTBOT_EMAIL=""
 KEYCLOAK_VERSION="24.0"
 GRIST_VERSION="latest"
 POSTGRES_VERSION="15-alpine"
+# Общий realm Keycloak с OnlyOffice и др. (issuer: .../realms/$KEYCLOAK_REALM)
+KEYCLOAK_REALM="ssa"
+
+################################################################################
+# Docker Compose wrapper — работает с docker compose и dc
+################################################################################
+
+# Определяем какую команду использовать: "docker compose" или "docker-compose"
+_init_docker_compose_cmd() {
+    if docker compose version &> /dev/null 2>&1; then
+        DOCKER_COMPOSE_CMD="docker compose"
+    elif command -v docker-compose &> /dev/null; then
+        DOCKER_COMPOSE_CMD="docker-compose"
+    else
+        echo "Error: Neither 'docker-compose' nor 'docker compose' found" >&2
+        exit 1
+    fi
+}
+
+# Инициализируем переменную при загрузке скрипта
+DOCKER_COMPOSE_CMD=""
+
+# Обертка над docker compose/docker-compose
+dc() {
+    if [[ -z "$DOCKER_COMPOSE_CMD" ]]; then
+        _init_docker_compose_cmd
+    fi
+    $DOCKER_COMPOSE_CMD "$@"
+}
 
 ################################################################################
 # Функции логирования
@@ -116,9 +148,9 @@ check_requirements() {
         fi
     done
 
-    # Проверить docker-compose
-    if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/null; then
-        log_error "docker-compose не установлен"
+    # Проверить docker compose (новый или старый синтаксис)
+    if ! command -v docker-compose &> /dev/null && ! docker compose version &> /dev/null 2>&1; then
+        log_error "docker-compose не установлен (нужен либо 'docker-compose', либо 'docker compose')"
         exit 1
     fi
 
@@ -451,6 +483,10 @@ generate_secrets() {
     if docker volume ls -q 2>/dev/null | grep -q 'keycloak-db-data'; then
         existing_pg_volume=true
     fi
+    # Also check with project prefix (grist-sso_keycloak-db-data)
+    if docker volume ls -q 2>/dev/null | grep -qE '(keycloak-db-data|.*_keycloak-db-data)'; then
+        existing_pg_volume=true
+    fi
 
     # PostgreSQL хранит пароль только при первом init тома; при повторном запуске скрипта
     # нельзя генерировать новый POSTGRES_KEYCLOAK_PASSWORD, если данные БД уже есть.
@@ -463,6 +499,10 @@ generate_secrets() {
         GRIST_API_KEY=$(read_env_var GRIST_API_KEY "$ENV_FILE")
         _grist_iev=$(read_env_var GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED "$ENV_FILE")
         [[ -n "$_grist_iev" ]] && GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED="$_grist_iev"
+        _grist_mcid=$(read_env_var GRIST_MOBILE_OIDC_CLIENT_ID "$ENV_FILE")
+        [[ -n "$_grist_mcid" ]] && GRIST_MOBILE_OIDC_CLIENT_ID="$_grist_mcid"
+        _grist_muri=$(read_env_var GRIST_MOBILE_OIDC_REDIRECT_URI "$ENV_FILE")
+        [[ -n "$_grist_muri" ]] && GRIST_MOBILE_OIDC_REDIRECT_URI="$_grist_muri"
         _grist_def=$(read_env_var GRIST_DEFAULT_EMAIL "$ENV_FILE")
         [[ -n "$_grist_def" ]] && GRIST_ADMIN_EMAIL="$_grist_def"
         _grist_org=$(read_env_var GRIST_ORG "$ENV_FILE")
@@ -475,6 +515,8 @@ generate_secrets() {
         [[ -n "$_grist_po" ]] && GRIST_PERSONAL_ORGS="$_grist_po"
         _grist_oca=$(read_env_var GRIST_ORG_CREATION_ANYONE "$ENV_FILE")
         [[ -n "$_grist_oca" ]] && GRIST_ORG_CREATION_ANYONE="$_grist_oca"
+        _kc_realm=$(read_env_var KEYCLOAK_REALM "$ENV_FILE")
+        [[ -n "$_kc_realm" ]] && KEYCLOAK_REALM="$_kc_realm"
         if [[ -z "$POSTGRES_KEYCLOAK_PASSWORD" ]]; then
             log_error "В $ENV_FILE нет POSTGRES_KEYCLOAK_PASSWORD, а файл существует. Исправьте .env или удалите том БД."
             exit 1
@@ -547,15 +589,19 @@ AUTH_DOMAIN=$AUTH_DOMAIN
 GRIST_DOMAIN=$GRIST_DOMAIN
 
 # Keycloak
-KEYCLOAK_REALM=grist
+KEYCLOAK_REALM=$KEYCLOAK_REALM
 KEYCLOAK_ADMIN_PASSWORD=$KEYCLOAK_ADMIN_PASSWORD
 
 # PostgreSQL
 POSTGRES_KEYCLOAK_PASSWORD=$POSTGRES_KEYCLOAK_PASSWORD
 
-# OIDC Client
+# OIDC Client (confidential — только для контейнера Grist, не для мобильного приложения)
 GRIST_OIDC_CLIENT_ID=grist-client
 GRIST_OIDC_CLIENT_SECRET=$GRIST_OIDC_CLIENT_SECRET
+
+# OIDC: нативные приложения (iOS/Android), public + PKCE в Keycloak; секрет не используется
+GRIST_MOBILE_OIDC_CLIENT_ID=$GRIST_MOBILE_OIDC_CLIENT_ID
+GRIST_MOBILE_OIDC_REDIRECT_URI=$GRIST_MOBILE_OIDC_REDIRECT_URI
 
 # Grist
 GRIST_ORG=$GRIST_ORG
@@ -700,7 +746,7 @@ reset_keycloak_postgres_volume() {
     cd "$DEPLOY_DIR" || exit 1
     if [[ -f docker-compose.yml ]]; then
         log_info "Остановка контейнеров..."
-        docker-compose --env-file .env down 2>/dev/null || docker-compose down 2>/dev/null || true
+        dc --env-file .env down 2>/dev/null || true
     fi
 
     local vols
@@ -714,7 +760,7 @@ reset_keycloak_postgres_volume() {
         [[ -z "$vol" ]] && continue
         log_warning "Удаление тома: $vol"
         if ! docker volume rm "$vol" 2>/dev/null; then
-            log_error "Не удалось удалить $vol — остановите контейнеры: docker-compose --env-file .env down"
+            log_error "Не удалось удалить $vol — остановите контейнеры: dc --env-file .env down"
             exit 1
         fi
     done <<< "$vols"
@@ -741,15 +787,15 @@ start_containers() {
     log_info "Запуск PostgreSQL и Keycloak..."
 
     if [[ "$VERBOSE" == true ]]; then
-        log_verbose "Running: docker-compose --env-file .env up -d postgres-keycloak keycloak"
+        log_verbose "Running: dc --env-file .env up -d postgres-keycloak keycloak"
     fi
 
-    docker-compose --env-file .env up -d postgres-keycloak keycloak
+    dc --env-file .env up -d postgres-keycloak keycloak
 
     if [[ "$VERBOSE" == true ]]; then
         log_verbose "Containers started, waiting for Keycloak to be ready..."
         log_verbose "Checking logs..."
-        docker-compose logs keycloak 2>/dev/null | tail -5 | while read line; do
+        dc logs keycloak 2>/dev/null | tail -5 | while read line; do
             log_verbose "  $line"
         done
     fi
@@ -759,7 +805,7 @@ start_containers() {
     local attempt=0
 
     while [ $attempt -lt $max_attempts ]; do
-        if docker-compose logs keycloak 2>/dev/null | grep -q "Running the server\|started in"; then
+        if dc logs keycloak 2>/dev/null | grep -q "Running the server\|started in"; then
             log_success "Keycloak готов"
             if [[ "$VERBOSE" == true ]]; then
                 log_verbose "Keycloak startup successful after $((attempt * 5)) seconds"
@@ -770,7 +816,7 @@ start_containers() {
         attempt=$((attempt + 1))
         if [[ "$VERBOSE" == true && $((attempt % 3)) == 0 ]]; then
             log_verbose "Attempt $attempt/60... checking logs"
-            docker-compose logs keycloak 2>/dev/null | tail -2 | while read line; do
+            dc logs keycloak 2>/dev/null | tail -2 | while read line; do
                 log_verbose "  $line"
             done
         fi
@@ -780,18 +826,18 @@ start_containers() {
 
     if [ $attempt -eq $max_attempts ]; then
         log_warning "Keycloak не стартовал за 5 минут"
-        log_info "Проверьте логи: docker-compose logs keycloak"
+        log_info "Проверьте логи: dc logs keycloak"
         if [[ "$VERBOSE" == true ]]; then
             log_verbose "Full Keycloak logs:"
-            docker-compose logs keycloak | tail -50 | while read line; do
+            dc logs keycloak | tail -50 | while read line; do
                 log_verbose "  $line"
             done
         fi
-        if docker-compose logs keycloak 2>/dev/null | grep -q 'password authentication failed'; then
+        if dc logs keycloak 2>/dev/null | grep -q 'password authentication failed'; then
             log_error "PostgreSQL отклоняет пароль пользователя keycloak: пароль в .env не совпадает с тем, что был при первом init тома."
             log_info "Повторите деплой с удалением тома и тем же .env (данные БД Keycloak будут сброшены):"
             log_info "  sudo $SCRIPT_DIR/deploy.sh ... --reset-postgres-volume"
-            log_info "или вручную: cd $DEPLOY_DIR && docker-compose --env-file .env down && docker volume rm \$(docker volume ls -q | grep keycloak-db-data)"
+            log_info "или вручную: cd $DEPLOY_DIR && dc --env-file .env down && docker volume rm \$(docker volume ls -q | grep keycloak-db-data)"
         fi
         log_error "Развертывание прервано: Keycloak не готов"
         exit 1
@@ -800,14 +846,14 @@ start_containers() {
     log_info "Запуск Grist..."
 
     if [[ "$VERBOSE" == true ]]; then
-        log_verbose "Running: docker-compose --env-file .env up -d grist"
+        log_verbose "Running: dc --env-file .env up -d grist"
     fi
 
-    docker-compose --env-file .env up -d grist
+    dc --env-file .env up -d grist
 
     if [[ "$VERBOSE" == true ]]; then
         log_verbose "Checking container status:"
-        docker-compose ps | while read line; do
+        dc ps | while read line; do
             log_verbose "  $line"
         done
     fi
@@ -834,6 +880,9 @@ setup_keycloak_realm() {
     export EMAIL_PASSWORD
     export KEYCLOAK_URL="http://localhost:8090"
     export GRIST_OIDC_CLIENT_SECRET_FILE="/tmp/grist-client-secret.txt"
+    export GRIST_MOBILE_OIDC_CLIENT_ID
+    export GRIST_MOBILE_OIDC_REDIRECT_URI
+    export KEYCLOAK_REALM
 
     if [[ "$VERBOSE" == true ]]; then
         log_verbose "Setting up Keycloak realm with these environment variables:"
@@ -845,6 +894,9 @@ setup_keycloak_realm() {
         log_verbose "  EMAIL_PORT: $EMAIL_PORT"
         log_verbose "  EMAIL_USER: $EMAIL_USER"
         log_verbose "  GRIST_OIDC_CLIENT_SECRET_FILE: $GRIST_OIDC_CLIENT_SECRET_FILE"
+        log_verbose "  GRIST_MOBILE_OIDC_CLIENT_ID: $GRIST_MOBILE_OIDC_CLIENT_ID"
+        log_verbose "  GRIST_MOBILE_OIDC_REDIRECT_URI: $GRIST_MOBILE_OIDC_REDIRECT_URI"
+        log_verbose "  KEYCLOAK_REALM: $KEYCLOAK_REALM"
         log_verbose "Script location: $SCRIPT_DIR/scripts/keycloak-realm-setup.sh"
     fi
 
@@ -891,16 +943,16 @@ setup_keycloak_realm() {
             log_info "Перезагрузка Grist с новой конфигурацией OIDC..."
 
             if [[ "$VERBOSE" == true ]]; then
-                log_verbose "Running: docker-compose down grist"
+                log_verbose "Running: dc down grist"
             fi
 
-            docker-compose --env-file .env down grist
+            dc --env-file .env down grist
 
             if [[ "$VERBOSE" == true ]]; then
-                log_verbose "Running: docker-compose --env-file .env up -d grist"
+                log_verbose "Running: dc --env-file .env up -d grist"
             fi
 
-            docker-compose --env-file .env up -d grist
+            dc --env-file .env up -d grist
 
             log_info "Ожидание Grist (максимум 2 минуты)..."
             local max_attempts=24
@@ -923,10 +975,10 @@ setup_keycloak_realm() {
             done
 
             if [ $attempt -eq $max_attempts ]; then
-                log_warning "Grist может не запуститься сразу, проверьте логи: docker-compose logs grist"
+                log_warning "Grist может не запуститься сразу, проверьте логи: dc logs grist"
                 if [[ "$VERBOSE" == true ]]; then
                     log_verbose "Grist startup timeout, showing last 20 lines of logs:"
-                    docker-compose logs grist | tail -20 | while read line; do
+                    dc logs grist | tail -20 | while read line; do
                         log_verbose "  $line"
                     done
                 fi
@@ -984,6 +1036,7 @@ run_tests() {
     export AUTH_DOMAIN
     export GRIST_DOMAIN
     export DEPLOY_DIR
+    export KEYCLOAK_REALM
 
     if bash "$SCRIPT_DIR/scripts/test-deployment.sh"; then
         log_success "Все тесты пройдены"
@@ -1006,9 +1059,9 @@ output_credentials() {
 {
   "grist_api_url": "https://$GRIST_DOMAIN",
   "auth_type": "oidc",
-  "oidc_issuer": "https://$AUTH_DOMAIN/realms/grist",
-  "client_id": "grist-client",
-  "redirect_uri": "app://grist-callback"
+  "oidc_issuer": "https://$AUTH_DOMAIN/realms/$KEYCLOAK_REALM",
+  "client_id": "$GRIST_MOBILE_OIDC_CLIENT_ID",
+  "redirect_uri": "$GRIST_MOBILE_OIDC_REDIRECT_URI"
 }
 EOF
 )
@@ -1018,9 +1071,9 @@ EOF
   "grist_api_url": "https://$GRIST_DOMAIN",
   "grist_org": "$GRIST_ORG",
   "auth_type": "oidc",
-  "oidc_issuer": "https://$AUTH_DOMAIN/realms/grist",
-  "client_id": "grist-client",
-  "redirect_uri": "app://grist-callback"
+  "oidc_issuer": "https://$AUTH_DOMAIN/realms/$KEYCLOAK_REALM",
+  "client_id": "$GRIST_MOBILE_OIDC_CLIENT_ID",
+  "redirect_uri": "$GRIST_MOBILE_OIDC_REDIRECT_URI"
 }
 EOF
 )
@@ -1042,12 +1095,18 @@ Password: $KEYCLOAK_ADMIN_PASSWORD
 ⚠️  СОХРАНИТЕ ЭТОТ ФАЙЛ В БЕЗОПАСНОМ МЕСТЕ!
 ────────────────────────────────────────────────────────────────────────────
 
-📋 OIDC CLIENT CONFIGURATION
+📋 OIDC — сервер Grist (confidential client)
 ────────────────────────────────────────────────────────────────────────────
 Client ID: grist-client
 Client Secret: $GRIST_OIDC_CLIENT_SECRET
-Issuer: https://$AUTH_DOMAIN/realms/grist
-Redirect URI: https://$GRIST_DOMAIN/oauth2/callback
+Issuer: https://$AUTH_DOMAIN/realms/$KEYCLOAK_REALM
+Redirect URI (Grist web): https://$GRIST_DOMAIN/oauth2/callback
+
+📱 OIDC — нативное приложение (public client + PKCE, без секрета)
+────────────────────────────────────────────────────────────────────────────
+Client ID: $GRIST_MOBILE_OIDC_CLIENT_ID
+Redirect URI: $GRIST_MOBILE_OIDC_REDIRECT_URI
+Issuer: https://$AUTH_DOMAIN/realms/$KEYCLOAK_REALM
 
 🔐 POSTGRESQL CREDENTIALS
 ────────────────────────────────────────────────────────────────────────────
@@ -1099,11 +1158,13 @@ Grist Application:
 📱 iOS/ANDROID INTEGRATION
 ================================================================================
 
-Use this configuration in your mobile app:
+Use this configuration in your mobile app (Keycloak client «$GRIST_MOBILE_OIDC_CLIENT_ID», не grist-client):
 
 $integration_json
 
 $(if [[ "$WANT_SINGLE_ORG" == true ]]; then echo "Note: GRIST_SINGLE_ORG включён, поэтому grist_org в URL/конфиге приложения обычно не требуется."; else echo "Note: GRIST_SINGLE_ORG выключен (multi-org), поэтому приложению нужен grist_org (slug) для выбора team site."; fi)
+
+grist-client с секретом используется только контейнером Grist; в приложении — PKCE с client_id «$GRIST_MOBILE_OIDC_CLIENT_ID».
 
 ================================================================================
 🔐 SECURITY NOTES
@@ -1131,7 +1192,7 @@ $(if [[ "$WANT_SINGLE_ORG" == true ]]; then echo "Note: GRIST_SINGLE_ORG вкл�
 ================================================================================
 
 1. Create users in Keycloak Admin Panel:
-   https://$AUTH_DOMAIN → Realm: grist → Users → Create user
+   https://$AUTH_DOMAIN → Realm: $KEYCLOAK_REALM → Users → Create user
 
 2. Create a test user:
    Email: test@example.com
@@ -1151,8 +1212,8 @@ $(if [[ "$WANT_SINGLE_ORG" == true ]]; then echo "Note: GRIST_SINGLE_ORG вкл�
 ================================================================================
 
 Check the logs:
-  docker-compose logs keycloak
-  docker-compose logs grist
+  dc logs keycloak
+  dc logs grist
   tail -f /tmp/grist-keycloak-deploy.log
 
 Run diagnostics:
@@ -1287,8 +1348,12 @@ rollback_deployment() {
 
     # Остановка контейнеров
     log_info "Остановка контейнеров..."
-    docker-compose stop 2>/dev/null || true
-    docker-compose rm -f 2>/dev/null || true
+    dc --env-file .env down 2>/dev/null || true
+
+    # Удаление .env и других конфиг-файлов
+    log_info "Удаление конфигурационных файлов..."
+    rm -f "$DEPLOY_DIR/.env" 2>/dev/null || true
+    rm -f "$DEPLOY_DIR/docker-compose.yml" 2>/dev/null || true
 
     # Удаление Nginx конфигов
     log_info "Удаление Nginx конфигов..."
@@ -1307,7 +1372,13 @@ rollback_deployment() {
     # Удаление volumes если указано
     if [[ "$KEEP_DATA" == false ]]; then
         log_warning "Удаление всех данных БД и файлов Grist..."
-        docker volume rm grist-sso_keycloak-db-data grist-sso_grist-data 2>/dev/null || true
+        # Remove all grist-sso related volumes
+        local vols
+        vols=$(docker volume ls -q 2>/dev/null | grep -E 'grist.*data|keycloak.*data' || true)
+        while IFS= read -r vol; do
+            [[ -z "$vol" ]] && continue
+            docker volume rm "$vol" 2>/dev/null || true
+        done <<< "$vols"
         log_warning "⚠️  НЕВОЗМОЖНО ВОССТАНОВИТЬ"
     else
         log_info "БД и данные Grist сохранены"

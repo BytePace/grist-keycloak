@@ -55,8 +55,9 @@ grist-keycloak/
 ### Фаза 4: Конфигурация сервисов
 ```
 ✅ Создание Keycloak realm 'grist'
-✅ Создание OIDC client 'grist-client'
-✅ Получение client_secret из Keycloak
+✅ Создание OIDC client 'grist-client' (confidential, для Grist)
+✅ Создание/синхронизация public client 'grist-mobile' (PKCE S256, для нативных приложений)
+✅ Получение client_secret из Keycloak (только для grist-client)
 ✅ Обновление .env с новым secret
 ✅ Пересоздание Grist с OIDC
 ```
@@ -94,7 +95,7 @@ bash scripts/keycloak-realm-setup.sh
 **Функции:**
 - Получает admin token из Keycloak
 - Создает realm 'grist'
-- Создает OIDC client 'grist-client'
+- Создает OIDC client 'grist-client' и public client 'grist-mobile' (PKCE)
 - Конфигурирует SMTP для отправки писем
 - Включает User Registration (опционально)
 - Получает client_secret и сохраняет в файл
@@ -335,12 +336,12 @@ docker-compose up -d keycloak
   "grist_org": "<GRIST_ORG из .env>",
   "auth_type": "oidc",
   "oidc_issuer": "https://auth.example.com/realms/grist",
-  "client_id": "grist-client",
-  "redirect_uri": "app://grist-callback"
+  "client_id": "grist-mobile",
+  "redirect_uri": "com.bytepace.scan-it-to-google-sheets://oauth/callback"
 }
 ```
 
-Это всё что нужно для подключения мобильного приложения к Grist через OIDC SSO.
+Клиент `grist-mobile` (public, PKCE) создаётся скриптом Keycloak; `grist-client` в JSON не используется — он для сервера Grist.
 
 ---
 

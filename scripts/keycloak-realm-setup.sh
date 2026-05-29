@@ -2,7 +2,8 @@
 
 ################################################################################
 # Keycloak Realm и OIDC Client Setup
-# Создание realm "grist" и OIDC client "grist-client" через Admin API
+# Создание realm ssa (KEYCLOAK_REALM), confidential client "grist-client" (Grist web) и
+# public client для нативных приложений (PKCE), по умолчанию "grist-mobile".
 ################################################################################
 
 set -euo pipefail
@@ -21,6 +22,10 @@ KEYCLOAK_URL="${KEYCLOAK_URL:-http://grist-sso-keycloak:8080}"
 GRIST_DOMAIN="${GRIST_DOMAIN}"
 AUTH_DOMAIN="${AUTH_DOMAIN}"
 GRIST_OIDC_CLIENT_SECRET_FILE="${GRIST_OIDC_CLIENT_SECRET_FILE:-/tmp/grist-client-secret.txt}"
+# Нативные приложения (iOS/Android): public client + PKCE, без client_secret
+GRIST_MOBILE_OIDC_CLIENT_ID="${GRIST_MOBILE_OIDC_CLIENT_ID:-grist-mobile}"
+GRIST_MOBILE_OIDC_REDIRECT_URI="${GRIST_MOBILE_OIDC_REDIRECT_URI:-com.bytepace.scan-it-to-google-sheets://oauth/callback}"
+KEYCLOAK_REALM="${KEYCLOAK_REALM:-ssa}"
 
 ################################################################################
 # Функции
@@ -93,10 +98,10 @@ get_admin_token() {
 # скрипт ошибочно считал успех; плюс jq безопасно кодирует пароль.
 update_realm_smtp() {
     local token="$1"
-    log_info "Настройка SMTP для realm 'grist'..."
+    log_info "Настройка SMTP для realm '${KEYCLOAK_REALM}'..."
 
     local realm_json merged put_tmp http_code put_body
-    realm_json=$(curl -s -H "Authorization: Bearer $token" "$KEYCLOAK_URL/admin/realms/grist")
+    realm_json=$(curl -s -H "Authorization: Bearer $token" "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}")
     if [[ -z "$realm_json" ]] || ! echo "$realm_json" | jq -e . >/dev/null 2>&1; then
         log_warning "Не удалось прочитать realm для SMTP (пропуск)"
         return 0
@@ -128,7 +133,7 @@ update_realm_smtp() {
 
     put_tmp=$(mktemp)
     http_code=$(curl -sS -o "$put_tmp" -w "%{http_code}" -X PUT \
-        "$KEYCLOAK_URL/admin/realms/grist" \
+        "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json; charset=UTF-8" \
         -d "$merged")
@@ -136,26 +141,26 @@ update_realm_smtp() {
     rm -f "$put_tmp"
 
     if [[ "$http_code" == "204" ]] || [[ "$http_code" == "200" ]]; then
-        log_success "SMTP для realm 'grist' настроен; Verify email включён (verifyEmail=true)"
+        log_success "SMTP для realm '${KEYCLOAK_REALM}' настроен; Verify email включён (verifyEmail=true)"
     else
-        log_warning "SMTP не применён (HTTP $http_code). Настройте вручную: Realm grist → Realm settings → Email. Ответ: $put_body"
+        log_warning "SMTP не применён (HTTP $http_code). Настройте вручную: Realm ${KEYCLOAK_REALM} → Realm settings → Email. Ответ: $put_body"
     fi
 }
 
 create_realm() {
     local token="$1"
 
-    log_info "Создание realm 'grist' (без SMTP в POST — он добавляется отдельно)..."
+    log_info "Создание realm '${KEYCLOAK_REALM}' (без SMTP в POST — он добавляется отдельно)..."
 
     # Тело только через jq + --data-binary: многострочный -d в bash иногда даёт Keycloak 400
     # "unable to read contents from stream". refreshTokenLifespan не входит в RealmRepresentation —
     # для SSO idle используем ssoSessionIdleTimeout.
     local payload_file tmp http_code response err_txt verify
     payload_file=$(mktemp)
-    jq -n '{
-        realm: "grist",
+    jq -n --arg realm "$KEYCLOAK_REALM" '{
+        realm: $realm,
         enabled: true,
-        displayName: "Grist",
+        displayName: "SSA",
         loginTheme: "keycloak",
         emailTheme: "keycloak",
         verifyEmail: true,
@@ -177,18 +182,18 @@ create_realm() {
     rm -f "$tmp"
 
     if [[ "$http_code" == "201" ]] || [[ "$http_code" == "204" ]]; then
-        log_success "Realm 'grist' создан (HTTP $http_code)"
+        log_success "Realm '${KEYCLOAK_REALM}' создан (HTTP $http_code)"
     elif [[ "$http_code" == "409" ]] || echo "$response" | grep -qi 'exists\|Conflict'; then
-        log_info "Realm 'grist' уже существует (HTTP $http_code)"
+        log_info "Realm '${KEYCLOAK_REALM}' уже существует (HTTP $http_code)"
     else
         err_txt=$(echo "$response" | jq -r '.error_description // .errorMessage // .error // empty' 2>/dev/null || true)
         echo "Ответ Keycloak при создании realm (HTTP $http_code): $response" >&2
         log_error "Ошибка при создании realm: ${err_txt:-HTTP $http_code}"
     fi
 
-    verify=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $token" "$KEYCLOAK_URL/admin/realms/grist")
+    verify=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $token" "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}")
     if [[ "$verify" != "200" ]]; then
-        log_error "Realm 'grist' недоступен после POST (GET → HTTP $verify). Проверьте логи Keycloak."
+        log_error "Realm '${KEYCLOAK_REALM}' недоступен после POST (GET → HTTP $verify). Проверьте логи Keycloak."
     fi
 
     update_realm_smtp "$token"
@@ -209,7 +214,7 @@ create_oidc_client() {
     hdr=$(mktemp)
     tmp=$(mktemp)
     http_code=$(curl -sS -D "$hdr" -o "$tmp" -w "%{http_code}" -X POST \
-        "$KEYCLOAK_URL/admin/realms/grist/clients" \
+        "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/clients" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json; charset=UTF-8" \
         -d '{
@@ -223,10 +228,12 @@ create_oidc_client() {
             "serviceAccountsEnabled": false,
             "authorizationServicesEnabled": false,
             "redirectUris": [
-                "https://'$GRIST_DOMAIN'/oauth2/callback"
+                "https://'$GRIST_DOMAIN'/oauth2/callback",
+                "http://localhost:3000/oauth2/callback"
             ],
             "webOrigins": [
-                "https://'$GRIST_DOMAIN'"
+                "https://'$GRIST_DOMAIN'",
+                "http://localhost:3000"
             ],
             "rootUrl": "https://'$GRIST_DOMAIN'",
             "baseUrl": "https://'$GRIST_DOMAIN'",
@@ -246,7 +253,7 @@ create_oidc_client() {
     fi
     if [[ -z "$client_id" ]] && [[ "$http_code" == "201" ]]; then
         client_id=$(curl -s -X GET \
-            "$KEYCLOAK_URL/admin/realms/grist/clients?clientId=grist-client" \
+            "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/clients?clientId=grist-client" \
             -H "Authorization: Bearer $token" | jq -r '.[0].id // empty')
     fi
 
@@ -259,10 +266,12 @@ create_oidc_client() {
     if [[ "$http_code" == "409" ]] || echo "$response" | grep -qi 'exists\|Conflict'; then
         log_info "OIDC client 'grist-client' уже существует (HTTP $http_code)"
         client_id=$(curl -s -X GET \
-            "$KEYCLOAK_URL/admin/realms/grist/clients?clientId=grist-client" \
+            "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/clients?clientId=grist-client" \
             -H "Authorization: Bearer $token" | jq -r '.[0].id // empty')
         if [[ -n "$client_id" ]]; then
             log_success "Используется существующий OIDC client (ID: $client_id)"
+            # Обновить redirectUris и webOrigins для существующего клиента
+            update_oidc_client_uris "$token" "$client_id"
             echo "$client_id"
             return
         fi
@@ -274,6 +283,176 @@ create_oidc_client() {
         log_error "Ошибка при создании client: $err_txt"
     fi
     log_error "Не удалось создать client (нет id в ответе)"
+}
+
+################################################################################
+# Обновление redirect URIs для существующего OIDC client
+################################################################################
+
+update_oidc_client_uris() {
+    local token="$1"
+    local client_id="$2"
+
+    log_info "Обновление redirectUris и webOrigins для grist-client..."
+
+    local current tmp http_code
+    current=$(curl -sS -X GET \
+        "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/clients/$client_id" \
+        -H "Authorization: Bearer $token")
+
+    tmp=$(mktemp)
+    echo "$current" | jq \
+        --arg domain "$GRIST_DOMAIN" '{
+            redirectUris: [
+                ("https://" + $domain + "/oauth2/callback"),
+                "http://localhost:3000/oauth2/callback"
+            ],
+            webOrigins: [
+                ("https://" + $domain),
+                "http://localhost:3000"
+            ]
+        } as $new_uris |
+        .redirectUris = $new_uris.redirectUris |
+        .webOrigins = $new_uris.webOrigins' > "$tmp"
+
+    http_code=$(curl -sS -o /dev/null -w "%{http_code}" -X PUT \
+        "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/clients/$client_id" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json; charset=UTF-8" \
+        -d @"$tmp")
+    rm -f "$tmp"
+
+    if [[ "$http_code" == "204" ]] || [[ "$http_code" == "200" ]]; then
+        log_success "redirectUris обновлены (HTTP $http_code): https://$GRIST_DOMAIN/oauth2/callback и http://localhost:3000/oauth2/callback"
+    else
+        log_warning "Не удалось обновить redirectUris (HTTP $http_code) — проверьте вручную в Keycloak Admin Console"
+    fi
+}
+
+################################################################################
+# Public OIDC client для нативных приложений (PKCE S256)
+# Отдельно от grist-client: тот confidential и с секретом для сервера Grist.
+################################################################################
+
+create_or_update_oidc_mobile_client() {
+    local token="$1"
+    local client_id_name="$GRIST_MOBILE_OIDC_CLIENT_ID"
+    local redirect_uri="$GRIST_MOBILE_OIDC_REDIRECT_URI"
+
+    log_info "OIDC client '$client_id_name' (public + PKCE) для нативных приложений; redirect: $redirect_uri"
+
+    local internal_uuid
+    internal_uuid=$(curl -s -G \
+        "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/clients" \
+        --data-urlencode "clientId=$client_id_name" \
+        -H "Authorization: Bearer $token" | jq -r '.[0].id // empty')
+
+    local payload_file tmp http_code response err_txt hdr location
+    payload_file=$(mktemp)
+    jq -n \
+        --arg cid "$client_id_name" \
+        --arg uri "$redirect_uri" \
+        '{
+            clientId: $cid,
+            protocol: "openid-connect",
+            enabled: true,
+            publicClient: true,
+            bearerOnly: false,
+            standardFlowEnabled: true,
+            directAccessGrantsEnabled: false,
+            implicitFlowEnabled: false,
+            serviceAccountsEnabled: false,
+            authorizationServicesEnabled: false,
+            redirectUris: [$uri],
+            webOrigins: ["+"],
+            attributes: {
+                "pkce.code.challenge.method": "S256"
+            }
+        }' > "$payload_file"
+
+    if [[ -z "$internal_uuid" ]]; then
+        hdr=$(mktemp)
+        tmp=$(mktemp)
+        http_code=$(curl -sS -D "$hdr" -o "$tmp" -w "%{http_code}" -X POST \
+            "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/clients" \
+            -H "Authorization: Bearer $token" \
+            -H "Content-Type: application/json; charset=UTF-8" \
+            --data-binary @"$payload_file")
+        response=$(cat "$tmp")
+        rm -f "$tmp"
+        location=$(grep -i '^[Ll]ocation:' "$hdr" | head -1 | tr -d '\r' | sed 's/^[Ll]ocation:[[:space:]]*//')
+        rm -f "$hdr"
+
+        internal_uuid=$(echo "$response" | jq -r '.id // empty')
+        if [[ -z "$internal_uuid" && -n "$location" ]]; then
+            internal_uuid="${location##*/}"
+            internal_uuid="${internal_uuid%%\?*}"
+        fi
+        if [[ -z "$internal_uuid" && "$http_code" == "201" ]]; then
+            internal_uuid=$(curl -s -G \
+                "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/clients" \
+                --data-urlencode "clientId=$client_id_name" \
+                -H "Authorization: Bearer $token" | jq -r '.[0].id // empty')
+        fi
+
+        rm -f "$payload_file"
+
+        if [[ "$http_code" == "201" ]] && [[ -n "$internal_uuid" ]]; then
+            log_success "OIDC client '$client_id_name' создан (UUID: $internal_uuid)"
+            return 0
+        fi
+        if [[ "$http_code" == "409" ]] || echo "$response" | grep -qi 'exists\|Conflict'; then
+            log_info "Клиент '$client_id_name' уже существует (HTTP $http_code), синхронизация настроек..."
+            internal_uuid=$(curl -s -G \
+                "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/clients" \
+                --data-urlencode "clientId=$client_id_name" \
+                -H "Authorization: Bearer $token" | jq -r '.[0].id // empty')
+        else
+            err_txt=$(echo "$response" | jq -r '.error_description // .errorMessage // .error // empty' 2>/dev/null || true)
+            echo "Ответ Keycloak (HTTP $http_code): $response" >&2
+            log_error "Не удалось создать '$client_id_name': ${err_txt:-HTTP $http_code}"
+        fi
+    else
+        rm -f "$payload_file"
+        log_info "Клиент '$client_id_name' найден (UUID: $internal_uuid), проверка redirect URI и PKCE..."
+    fi
+
+    if [[ -z "$internal_uuid" ]]; then
+        log_error "Не удалось определить UUID клиента '$client_id_name' в Keycloak"
+    fi
+
+    local current merged put_tmp put_http
+    current=$(curl -sS -X GET \
+        "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/clients/$internal_uuid" \
+        -H "Authorization: Bearer $token")
+
+    put_tmp=$(mktemp)
+    echo "$current" | jq --arg uri "$redirect_uri" '
+        .publicClient = true |
+        .standardFlowEnabled = true |
+        .directAccessGrantsEnabled = false |
+        .implicitFlowEnabled = false |
+        .serviceAccountsEnabled = false |
+        .authorizationServicesEnabled = false |
+        (.redirectUris // []) as $r |
+        .redirectUris = ($r + [$uri] | unique) |
+        .webOrigins = (if (.webOrigins // []) | length > 0 then .webOrigins else ["+"] end) |
+        .attributes = (.attributes // {}) |
+        .attributes["pkce.code.challenge.method"] = "S256"
+    ' > "$put_tmp"
+
+    put_http=$(curl -sS -o /dev/null -w "%{http_code}" -X PUT \
+        "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/clients/$internal_uuid" \
+        -H "Authorization: Bearer $token" \
+        -H "Content-Type: application/json; charset=UTF-8" \
+        -d @"$put_tmp")
+    rm -f "$put_tmp"
+
+    if [[ "$put_http" == "204" ]] || [[ "$put_http" == "200" ]]; then
+        log_success "Клиент '$client_id_name' обновлён (HTTP $put_http): public, PKCE S256, redirect в списке"
+    else
+        log_warning "PUT '$client_id_name' вернул HTTP $put_http — проверьте клиент в Keycloak Admin Console"
+    fi
 }
 
 ################################################################################
@@ -295,7 +474,7 @@ ensure_oidc_client_post_logout_redirect() {
 
     local current tmp merged http_code
     current=$(curl -sS -X GET \
-        "$KEYCLOAK_URL/admin/realms/grist/clients/$client_id" \
+        "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/clients/$client_id" \
         -H "Authorization: Bearer $token")
 
     tmp=$(mktemp)
@@ -313,7 +492,7 @@ ensure_oidc_client_post_logout_redirect() {
     ' > "$tmp"
 
     http_code=$(curl -sS -o /dev/null -w "%{http_code}" -X PUT \
-        "$KEYCLOAK_URL/admin/realms/grist/clients/$client_id" \
+        "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/clients/$client_id" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json; charset=UTF-8" \
         -d @"$tmp")
@@ -337,7 +516,7 @@ get_client_secret() {
     log_info "Получение client secret..."
 
     local response=$(curl -s -X GET \
-        "$KEYCLOAK_URL/admin/realms/grist/clients/$client_id/client-secret" \
+        "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/clients/$client_id/client-secret" \
         -H "Authorization: Bearer $token")
 
     local secret=$(echo "$response" | jq -r '.value // empty')
@@ -361,11 +540,11 @@ enable_user_registration() {
     log_info "Включение User Registration в realm (без сброса verifyEmail)..."
 
     local realm_json merged put_tmp http_code put_body
-    realm_json=$(curl -s -H "Authorization: Bearer $token" "$KEYCLOAK_URL/admin/realms/grist")
+    realm_json=$(curl -s -H "Authorization: Bearer $token" "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}")
     if [[ -z "$realm_json" ]] || ! echo "$realm_json" | jq -e . >/dev/null 2>&1; then
         log_warning "Не удалось прочитать realm для registration (пропуск merge)"
         curl -s -X PUT \
-            "$KEYCLOAK_URL/admin/realms/grist" \
+            "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}" \
             -H "Authorization: Bearer $token" \
             -H "Content-Type: application/json" \
             -d '{
@@ -388,7 +567,7 @@ enable_user_registration() {
 
     put_tmp=$(mktemp)
     http_code=$(curl -sS -o "$put_tmp" -w "%{http_code}" -X PUT \
-        "$KEYCLOAK_URL/admin/realms/grist" \
+        "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json; charset=UTF-8" \
         -d "$merged")
@@ -415,7 +594,7 @@ create_test_user() {
 
     # Проверить существование пользователя
     local user_id=$(curl -s -X GET \
-        "$KEYCLOAK_URL/admin/realms/grist/users?email=$email&exact=true" \
+        "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users?email=$email&exact=true" \
         -H "Authorization: Bearer $token" | jq -r '.[0].id // empty')
 
     if [[ ! -z "$user_id" ]]; then
@@ -425,7 +604,7 @@ create_test_user() {
 
     # Создать пользователя
     local response=$(curl -s -i -X POST \
-        "$KEYCLOAK_URL/admin/realms/grist/users" \
+        "${KEYCLOAK_URL}/admin/realms/${KEYCLOAK_REALM}/users" \
         -H "Authorization: Bearer $token" \
         -H "Content-Type: application/json" \
         -d '{
@@ -494,6 +673,9 @@ main() {
     client_id=$(create_oidc_client "$admin_token")
 
     ensure_oidc_client_post_logout_redirect "$admin_token" "$client_id"
+
+    # Публичный клиент для iOS/Android (PKCE), отдельно от grist-client
+    create_or_update_oidc_mobile_client "$admin_token"
 
     # Получить client secret
     local client_secret

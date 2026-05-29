@@ -212,8 +212,8 @@ docker exec -it grist-sso-keycloak /opt/keycloak/bin/kcadm.sh \
   "grist_api_url": "https://grist.example.com",
   "auth_type": "oidc",
   "oidc_issuer": "https://auth.example.com/realms/grist",
-  "client_id": "grist-client",
-  "redirect_uri": "app://grist-callback"
+  "client_id": "grist-mobile",
+  "redirect_uri": "com.bytepace.scan-it-to-google-sheets://oauth/callback"
 }
 ```
 
@@ -224,10 +224,12 @@ let gristConfig: [String: Any] = [
     "grist_api_url": "https://grist.example.com",
     "auth_type": "oidc",
     "oidc_issuer": "https://auth.example.com/realms/grist",
-    "client_id": "grist-client",
-    "redirect_uri": "app://grist-callback"
+    "client_id": "grist-mobile",
+    "redirect_uri": "com.bytepace.scan-it-to-google-sheets://oauth/callback"
 ]
 ```
+
+**Важно:** `grist-client` — confidential client для **сервера Grist** (есть секрет в `.env`). Для **ASWebAuthenticationSession** / PKCE в приложении используйте `grist-mobile` (создаётся `scripts/keycloak-realm-setup.sh`); секрет не нужен.
 
 ### Нужен ли API Key для мобильного приложения?
 
