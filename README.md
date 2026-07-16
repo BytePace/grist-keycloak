@@ -4,7 +4,7 @@
 
 ## ✨ Особенности
 
-- ✅ Полностью автоматизированное развертывание Docker (PostgreSQL, Keycloak, Grist)
+- ✅ Полностью автоматизированное развертывание Docker (PostgreSQL, Keycloak, Grist) или только Grist с внешним Keycloak (`--keycloak-mode existing`)
 - ✅ Генерация паролей и секретов; при повторном запуске с `KEEP_DATA` — загрузка из существующего `.env` (совместимость с томом БД)
 - ✅ Опционально: **nginx** reverse proxy и HTTPS (`--setup-nginx`; нужны уже выпущенные сертификаты Let's Encrypt для доменов)
 - ✅ Docker контейнеризация (легко обновлять)
@@ -13,6 +13,7 @@
 - ✅ Автоматические тесты после развертывания
 - ✅ JSON в `deploy-output.txt` для интеграции мобильных клиентов (отдельный QR-файл не создаётся)
 - ✅ OIDC SSO для Grist
+- ✅ Shared Keycloak: `--keycloak-mode existing --keycloak-url https://auth.example.com`
 
 ## 🚀 Быстрый старт
 
@@ -35,6 +36,7 @@ sudo bash deploy.sh
 ### CLI режим (с параметрами)
 
 ```bash
+# Локальный Keycloak (по умолчанию)
 sudo bash deploy.sh \
   --auth-domain auth.example.com \
   --grist-domain grist.example.com \
@@ -43,9 +45,20 @@ sudo bash deploy.sh \
   --grist-admin-email admin@example.com \
   --certbot-email admin@example.com \
   --setup-nginx
+
+# Внешний / shared Keycloak (без локального Keycloak+Postgres)
+sudo bash deploy.sh \
+  --keycloak-mode existing \
+  --keycloak-url https://auth.example.com \
+  --keycloak-realm ssa \
+  --keycloak-admin-password 'KEYCLOAK_ADMIN_PASSWORD' \
+  --grist-domain grist.example.com \
+  --grist-admin-email admin@example.com \
+  --certbot-email admin@example.com \
+  --setup-nginx
 ```
 
-`--setup-nginx` записывает конфиг в `/etc/nginx/sites-available/grist-sso.conf` и проксирует на Keycloak (`127.0.0.1:8090`) и Grist (`127.0.0.1:3000`). Перед этим выпустите сертификаты, например: `sudo certbot certonly --nginx -d auth.example.com` и `-d grist.example.com`.
+`--setup-nginx` записывает конфиг в `/etc/nginx/sites-available/grist-sso.conf`. В mode=`new` проксирует Keycloak (`127.0.0.1:8090`) и Grist (`127.0.0.1:3000`). В mode=`existing` — только Grist; Keycloak остаётся на `--keycloak-url`. Перед этим выпустите сертификаты Let's Encrypt для нужных доменов.
 
 ## 📋 Что спрашивает скрипт
 

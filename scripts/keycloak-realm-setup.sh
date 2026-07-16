@@ -98,6 +98,16 @@ get_admin_token() {
 # скрипт ошибочно считал успех; плюс jq безопасно кодирует пароль.
 update_realm_smtp() {
     local token="$1"
+
+    if [[ -z "${EMAIL_PASSWORD:-}" ]]; then
+        log_info "EMAIL_PASSWORD не задан — SMTP shared realm не меняем (пропуск)"
+        return 0
+    fi
+    if [[ -z "${EMAIL_USER:-}" || -z "${EMAIL_HOST:-}" ]]; then
+        log_info "EMAIL_USER/EMAIL_HOST не заданы — SMTP не меняем (пропуск)"
+        return 0
+    fi
+
     log_info "Настройка SMTP для realm '$KEYCLOAK_REALM'..."
 
     local realm_json merged put_tmp http_code put_body
@@ -271,6 +281,40 @@ create_oidc_client() {
             -H "Authorization: Bearer $token" | jq -r '.[0].id // empty')
         if [[ -n "$client_id" ]]; then
             log_success "Используется существующий OIDC client (ID: $client_id)"
+            # Обновить redirect URIs / web origins под текущий GRIST_DOMAIN
+            local current tmp put_http
+            current=$(curl -s -X GET \
+                "$KEYCLOAK_URL/admin/realms/$KEYCLOAK_REALM/clients/$client_id" \
+                -H "Authorization: Bearer $token")
+            tmp=$(mktemp)
+            echo "$current" | jq \
+                --arg cb "https://${GRIST_DOMAIN}/oauth2/callback" \
+                --arg origin "https://${GRIST_DOMAIN}" \
+                --arg root "https://${GRIST_DOMAIN}" \
+                --arg logout "https://${GRIST_DOMAIN}/signed-out" \
+                '
+                .redirectUris = ((.redirectUris // []) + [$cb] | unique) |
+                .webOrigins = ((.webOrigins // []) + [$origin] | unique) |
+                .rootUrl = $root |
+                .baseUrl = $root |
+                .attributes = (.attributes // {}) |
+                .attributes["post.logout.redirect.uris"] = (
+                    if ((.attributes["post.logout.redirect.uris"] // "") | index($logout)) != null then
+                        .attributes["post.logout.redirect.uris"]
+                    elif (.attributes["post.logout.redirect.uris"] // "") == "" then
+                        $logout
+                    else
+                        .attributes["post.logout.redirect.uris"] + "##" + $logout
+                    end
+                )
+                ' > "$tmp"
+            put_http=$(curl -sS -o /dev/null -w "%{http_code}" -X PUT \
+                "$KEYCLOAK_URL/admin/realms/$KEYCLOAK_REALM/clients/$client_id" \
+                -H "Authorization: Bearer $token" \
+                -H "Content-Type: application/json; charset=UTF-8" \
+                -d @"$tmp")
+            rm -f "$tmp"
+            log_info "Обновление redirect/webOrigins для grist-client: HTTP $put_http"
             echo "$client_id"
             return
         fi

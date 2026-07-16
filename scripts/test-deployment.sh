@@ -18,6 +18,8 @@ NC='\033[0m'
 AUTH_DOMAIN="${AUTH_DOMAIN}"
 GRIST_DOMAIN="${GRIST_DOMAIN}"
 KEYCLOAK_REALM="${KEYCLOAK_REALM:-ssa}"
+KEYCLOAK_MODE="${KEYCLOAK_MODE:-new}"
+KEYCLOAK_URL="${KEYCLOAK_URL:-https://${AUTH_DOMAIN}}"
 DEPLOY_DIR="${DEPLOY_DIR:-.}"
 
 # Результаты
@@ -94,7 +96,10 @@ test_ports() {
 test_docker_containers() {
     log_test "Проверка Docker контейнеров"
 
-    local containers=("grist-sso-postgres" "grist-sso-keycloak" "grist-sso-grist")
+    local containers=("grist-sso-grist")
+    if [[ "$KEYCLOAK_MODE" != "existing" ]]; then
+        containers=("grist-sso-postgres" "grist-sso-keycloak" "grist-sso-grist")
+    fi
 
     for container in "${containers[@]}"; do
         if docker ps --filter "name=$container" --format "{{.Names}}" | grep -q "$container"; then
@@ -148,7 +153,7 @@ test_grist_https() {
 test_oidc_discovery() {
     log_test "Проверка OIDC Discovery Endpoint"
 
-    local endpoint="https://$AUTH_DOMAIN/realms/$KEYCLOAK_REALM/.well-known/openid-configuration"
+    local endpoint="${KEYCLOAK_URL}/realms/$KEYCLOAK_REALM/.well-known/openid-configuration"
     log_info "Проверка: $endpoint"
 
     if curl -s -k "$endpoint" | jq -e '.issuer' > /dev/null 2>&1; then
@@ -169,7 +174,12 @@ test_oidc_discovery() {
 test_ssl_certificates() {
     log_test "Проверка SSL сертификатов"
 
-    for domain in "$AUTH_DOMAIN" "$GRIST_DOMAIN"; do
+    local domains=("$GRIST_DOMAIN")
+    if [[ "$KEYCLOAK_MODE" != "existing" ]]; then
+        domains=("$AUTH_DOMAIN" "$GRIST_DOMAIN")
+    fi
+
+    for domain in "${domains[@]}"; do
         log_info "Проверка сертификата для: $domain"
 
         local expiry=$(echo | openssl s_client -servername "$domain" -connect "$domain:443" 2>/dev/null | \
@@ -189,6 +199,12 @@ test_ssl_certificates() {
 
 test_postgres() {
     log_test "Проверка PostgreSQL"
+
+    if [[ "$KEYCLOAK_MODE" == "existing" ]]; then
+        log_info "Mode=existing: локальный PostgreSQL Keycloak не используется — пропуск"
+        TESTS_PASSED=$((TESTS_PASSED + 1))
+        return
+    fi
 
     if docker exec grist-sso-postgres pg_isready -U keycloak > /dev/null 2>&1; then
         log_success "PostgreSQL доступна"
@@ -268,12 +284,19 @@ print_summary() {
 
 main() {
     log_info "Deployment Testing"
+    log_info "Keycloak mode: $KEYCLOAK_MODE"
     log_info "Auth Domain: $AUTH_DOMAIN"
+    log_info "Keycloak URL: $KEYCLOAK_URL"
     log_info "Grist Domain: $GRIST_DOMAIN"
 
     # Валидация параметров
     if [[ -z "$AUTH_DOMAIN" || -z "$GRIST_DOMAIN" ]]; then
         log_error "AUTH_DOMAIN и GRIST_DOMAIN должны быть установлены"
+        exit 1
+    fi
+
+    if [[ ! "$KEYCLOAK_URL" =~ ^https?:// ]]; then
+        KEYCLOAK_URL="https://${KEYCLOAK_URL}"
     fi
 
     # Запустить тесты

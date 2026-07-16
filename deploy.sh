@@ -28,6 +28,9 @@ RESET_POSTGRES_VOLUME=false
 SETUP_NGINX=false
 
 # Конфиг
+# new = локальный Keycloak в compose (по умолчанию); existing = внешний shared Keycloak
+KEYCLOAK_MODE="new"
+KEYCLOAK_URL=""
 AUTH_DOMAIN=""
 GRIST_DOMAIN=""
 EMAIL_USER=""
@@ -59,6 +62,10 @@ KEYCLOAK_VERSION="24.0"
 GRIST_VERSION="latest"
 POSTGRES_VERSION="15-alpine"
 KEYCLOAK_REALM="ssa"
+KEYCLOAK_ADMIN_PASSWORD=""
+POSTGRES_KEYCLOAK_PASSWORD=""
+GRIST_OIDC_CLIENT_SECRET=""
+GRIST_API_KEY=""
 
 ################################################################################
 # Функции логирования
@@ -161,6 +168,22 @@ parse_arguments() {
                 GRIST_DOMAIN="$2"
                 shift 2
                 ;;
+            --keycloak-mode)
+                KEYCLOAK_MODE="$2"
+                shift 2
+                ;;
+            --keycloak-url)
+                KEYCLOAK_URL="$2"
+                shift 2
+                ;;
+            --keycloak-realm)
+                KEYCLOAK_REALM="$2"
+                shift 2
+                ;;
+            --keycloak-admin-password)
+                KEYCLOAK_ADMIN_PASSWORD="$2"
+                shift 2
+                ;;
             --email-user)
                 EMAIL_USER="$2"
                 shift 2
@@ -255,21 +278,34 @@ print_usage() {
 Использование: sudo ./deploy.sh [OPTIONS]
 
 Развертывание:
-  ./deploy.sh                                    # Интерактивный режим
+  ./deploy.sh                                    # Интерактивный режим (локальный Keycloak)
   ./deploy.sh --auth-domain auth.example.com \
               --grist-domain grist.example.com \
               --email-user admin@gmail.com \
               --email-password "app-password"
+
+  # Shared / внешний Keycloak (без локального Keycloak+Postgres):
+  ./deploy.sh --keycloak-mode existing \
+              --keycloak-url https://auth.example.com \
+              --keycloak-admin-password '...' \
+              --grist-domain grist.example.com \
+              --grist-admin-email admin@example.com \
+              --certbot-email admin@example.com \
+              --setup-nginx
 
 Откатывание:
   ./deploy.sh --rollback --keep-data             # Откатить, сохранить БД
   ./deploy.sh --rollback --delete-all            # Полная очистка (опасно!)
 
 Параметры:
-  --auth-domain DOMAIN            Домен для Keycloak (обязательный)
+  --keycloak-mode MODE            new (default) | existing
+  --keycloak-url URL              URL внешнего Keycloak (обязателен для existing)
+  --keycloak-realm REALM          Realm (по умолчанию: ssa)
+  --keycloak-admin-password PASS  Admin password Keycloak (обязателен для existing)
+  --auth-domain DOMAIN            Домен для Keycloak (обязательный в mode=new)
   --grist-domain DOMAIN           Домен для Grist (обязательный)
-  --email-user EMAIL              Email для SMTP (обязательный)
-  --email-password PASS           Пароль/App Password (обязательный)
+  --email-user EMAIL              Email для SMTP (обязательный в mode=new; в existing опционален)
+  --email-password PASS           Пароль/App Password (обязательный в mode=new; в existing опционален)
   --email-host HOST               SMTP хост (по умолчанию: smtp.gmail.com)
   --grist-admin-email EMAIL       Email админа Grist (обязательный)
   --certbot-email EMAIL           Email для Let's Encrypt (обязательный)
@@ -277,23 +313,18 @@ print_usage() {
   --delete-all                    При откатывании удалить всё (опасно!)
   --clear-ssl                     Удалить SSL сертификаты
   --verbose                       Verbose логирование (отладка)
-  --reset-postgres-volume         Удалить Docker-том БД Keycloak перед деплоем (после
-                                  смены пароля в .env без совпадения с данными в томе;
-                                  данные realm в Postgres будут потеряны)
-  --setup-nginx                   После деплоя установить nginx/certbot, выпустить
-                                  Let's Encrypt сертификаты и включить reverse proxy
-  --ignore-email-verified         GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED=true: разрешить
-                                  вход в Grist без подтверждения email в IdP (Keycloak
-                                  часто отдаёт email_verified=false при отключённой верификации)
-  --single-org                    GRIST_SINGLE_ORG=\$GRIST_ORG (режим одной команды, как по умолчанию)
-  --multi-org                     не задавать GRIST_SINGLE_ORG (несколько team sites)
-  --grist-force-login BOOL        true|false — GRIST_FORCE_LOGIN (без TTY не спрашиваем вопросы)
+  --reset-postgres-volume         Удалить Docker-том БД Keycloak перед деплоем (только mode=new)
+  --setup-nginx                   После деплоя установить nginx/certbot и reverse proxy
+  --ignore-email-verified         GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED=true
+  --single-org                    GRIST_SINGLE_ORG=\$GRIST_ORG
+  --multi-org                     не задавать GRIST_SINGLE_ORG
+  --grist-force-login BOOL        true|false — GRIST_FORCE_LOGIN
   --grist-personal-orgs BOOL      true|false — GRIST_PERSONAL_ORGS
   --grist-org-creation-anyone BOOL true|false — GRIST_ORG_CREATION_ANYONE
 
 Примеры:
-  # С verbose режимом для отладки
   sudo ./deploy.sh --auth-domain auth.example.com ... --verbose
+  sudo ./deploy.sh --keycloak-mode existing --keycloak-url https://auth.bytepace.com ...
 
 EOF
 }
@@ -358,11 +389,45 @@ interactive_grist_env_prompts() {
 interactive_input() {
     log_step "Интерактивная настройка"
 
-    if [[ -z "$AUTH_DOMAIN" ]]; then
-        read -p "📝 Домен для Keycloak (например: auth.example.com): " AUTH_DOMAIN
+    if [[ -z "$KEYCLOAK_MODE" ]]; then
+        KEYCLOAK_MODE="new"
+    fi
+
+    if [[ -t 0 ]] && [[ "$KEYCLOAK_MODE" == "new" || "$KEYCLOAK_MODE" == "existing" ]]; then
+        if [[ -z "$KEYCLOAK_URL" && -z "$AUTH_DOMAIN" ]]; then
+            local mode_choice
+            mode_choice=$(read_bool_interactive "Использовать внешний (shared) Keycloak вместо локального?" false)
+            if [[ "$mode_choice" == true ]]; then
+                KEYCLOAK_MODE="existing"
+            else
+                KEYCLOAK_MODE="new"
+            fi
+        fi
+    fi
+
+    if [[ "$KEYCLOAK_MODE" == "existing" ]]; then
+        if [[ -z "$KEYCLOAK_URL" ]]; then
+            read -p "📝 URL внешнего Keycloak (например: https://auth.example.com): " KEYCLOAK_URL
+            if [[ -z "$KEYCLOAK_URL" ]]; then
+                log_error "KEYCLOAK_URL не может быть пустым"
+                exit 1
+            fi
+        fi
+        if [[ -z "$KEYCLOAK_ADMIN_PASSWORD" ]]; then
+            read -sp "🔐 Пароль admin Keycloak: " KEYCLOAK_ADMIN_PASSWORD
+            echo ""
+            if [[ -z "$KEYCLOAK_ADMIN_PASSWORD" ]]; then
+                log_error "KEYCLOAK_ADMIN_PASSWORD не может быть пустым"
+                exit 1
+            fi
+        fi
+    else
         if [[ -z "$AUTH_DOMAIN" ]]; then
-            log_error "Домен не может быть пустым"
-            exit 1
+            read -p "📝 Домен для Keycloak (например: auth.example.com): " AUTH_DOMAIN
+            if [[ -z "$AUTH_DOMAIN" ]]; then
+                log_error "Домен не может быть пустым"
+                exit 1
+            fi
         fi
     fi
 
@@ -374,20 +439,30 @@ interactive_input() {
         fi
     fi
 
-    if [[ -z "$EMAIL_USER" ]]; then
-        read -p "📝 Email для SMTP (например: noreply@gmail.com): " EMAIL_USER
+    if [[ "$KEYCLOAK_MODE" == "new" ]]; then
         if [[ -z "$EMAIL_USER" ]]; then
-            log_error "Email не может быть пустым"
-            exit 1
+            read -p "📝 Email для SMTP (например: noreply@gmail.com): " EMAIL_USER
+            if [[ -z "$EMAIL_USER" ]]; then
+                log_error "Email не может быть пустым"
+                exit 1
+            fi
         fi
-    fi
 
-    if [[ -z "$EMAIL_PASSWORD" ]]; then
-        read -sp "🔐 Пароль/App Password для SMTP: " EMAIL_PASSWORD
-        echo ""
         if [[ -z "$EMAIL_PASSWORD" ]]; then
-            log_error "Пароль не может быть пустым"
-            exit 1
+            read -sp "🔐 Пароль/App Password для SMTP: " EMAIL_PASSWORD
+            echo ""
+            if [[ -z "$EMAIL_PASSWORD" ]]; then
+                log_error "Пароль не может быть пустым"
+                exit 1
+            fi
+        fi
+    else
+        if [[ -t 0 ]] && [[ -z "$EMAIL_USER" ]]; then
+            read -p "📝 Email для SMTP (опционально, Enter = не менять SMTP в Keycloak): " EMAIL_USER || true
+        fi
+        if [[ -t 0 ]] && [[ -n "$EMAIL_USER" ]] && [[ -z "$EMAIL_PASSWORD" ]]; then
+            read -sp "🔐 Пароль/App Password для SMTP: " EMAIL_PASSWORD
+            echo ""
         fi
     fi
 
@@ -419,19 +494,46 @@ interactive_input() {
 validate_input() {
     log_step "Валидация конфигурации"
 
-    # Проверить что домены не пусты
-    if [[ -z "$AUTH_DOMAIN" || -z "$GRIST_DOMAIN" || -z "$EMAIL_USER" || -z "$EMAIL_PASSWORD" || -z "$GRIST_ADMIN_EMAIL" || -z "$CERTBOT_EMAIL" ]]; then
-        log_error "Не все параметры заполнены"
+    if [[ "$KEYCLOAK_MODE" != "new" && "$KEYCLOAK_MODE" != "existing" ]]; then
+        log_error "--keycloak-mode должен быть 'new' или 'existing' (получено: $KEYCLOAK_MODE)"
         exit 1
     fi
 
-    # Проверить что домены не одинаковые
+    if [[ -z "$GRIST_DOMAIN" || -z "$GRIST_ADMIN_EMAIL" || -z "$CERTBOT_EMAIL" ]]; then
+        log_error "Не все параметры заполнены (нужны GRIST_DOMAIN, GRIST_ADMIN_EMAIL, CERTBOT_EMAIL)"
+        exit 1
+    fi
+
+    if [[ "$KEYCLOAK_MODE" == "existing" ]]; then
+        if [[ -z "$KEYCLOAK_URL" ]]; then
+            log_error "--keycloak-url обязателен для --keycloak-mode existing"
+            exit 1
+        fi
+        if [[ -z "$KEYCLOAK_ADMIN_PASSWORD" ]]; then
+            log_error "--keycloak-admin-password обязателен для --keycloak-mode existing"
+            exit 1
+        fi
+        # Нормализовать URL и AUTH_DOMAIN
+        if [[ ! "$KEYCLOAK_URL" =~ ^https?:// ]]; then
+            KEYCLOAK_URL="https://${KEYCLOAK_URL}"
+        fi
+        KEYCLOAK_URL="${KEYCLOAK_URL%/}"
+        AUTH_DOMAIN="${KEYCLOAK_URL#https://}"
+        AUTH_DOMAIN="${AUTH_DOMAIN#http://}"
+        AUTH_DOMAIN="${AUTH_DOMAIN%%/*}"
+    else
+        if [[ -z "$AUTH_DOMAIN" || -z "$EMAIL_USER" || -z "$EMAIL_PASSWORD" ]]; then
+            log_error "Для mode=new нужны AUTH_DOMAIN, EMAIL_USER, EMAIL_PASSWORD"
+            exit 1
+        fi
+        KEYCLOAK_URL="https://${AUTH_DOMAIN}"
+    fi
+
     if [[ "$AUTH_DOMAIN" == "$GRIST_DOMAIN" ]]; then
         log_error "AUTH_DOMAIN и GRIST_DOMAIN должны быть разными"
         exit 1
     fi
 
-    # Базовая проверка email
     if ! [[ "$GRIST_ADMIN_EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
         log_error "Неверный формат email: $GRIST_ADMIN_EMAIL"
         exit 1
@@ -460,7 +562,7 @@ generate_secrets() {
 
     local ENV_FILE="$DEPLOY_DIR/.env"
     local existing_pg_volume=false
-    if docker volume ls -q 2>/dev/null | grep -q 'keycloak-db-data'; then
+    if [[ "$KEYCLOAK_MODE" == "new" ]] && docker volume ls -q 2>/dev/null | grep -q 'keycloak-db-data'; then
         existing_pg_volume=true
     fi
 
@@ -468,8 +570,15 @@ generate_secrets() {
     # нельзя генерировать новый POSTGRES_KEYCLOAK_PASSWORD, если данные БД уже есть.
     if [[ -f "$ENV_FILE" ]] && [[ "$KEEP_DATA" == true ]]; then
         log_info "Загрузка секретов из $ENV_FILE (без перегенерации при KEEP_DATA)"
-        log_info "Если Keycloak пишет «password authentication failed», пароль в .env не совпадает с тем, что был при первом init тома PostgreSQL — удалите том или запустите с --reset-postgres-volume"
-        KEYCLOAK_ADMIN_PASSWORD=$(read_env_var KEYCLOAK_ADMIN_PASSWORD "$ENV_FILE")
+        if [[ "$KEYCLOAK_MODE" == "new" ]]; then
+            log_info "Если Keycloak пишет «password authentication failed», пароль в .env не совпадает с тем, что был при первом init тома PostgreSQL — удалите том или запустите с --reset-postgres-volume"
+        fi
+        local _kc_admin _kc_url
+        _kc_admin=$(read_env_var KEYCLOAK_ADMIN_PASSWORD "$ENV_FILE")
+        [[ -n "$_kc_admin" && -z "$KEYCLOAK_ADMIN_PASSWORD" ]] && KEYCLOAK_ADMIN_PASSWORD="$_kc_admin"
+        _kc_url=$(read_env_var KEYCLOAK_URL "$ENV_FILE")
+        [[ -n "$_kc_url" && -z "$KEYCLOAK_URL" ]] && KEYCLOAK_URL="$_kc_url"
+        # KEYCLOAK_MODE берём из CLI/validate_input, не из старого .env
         POSTGRES_KEYCLOAK_PASSWORD=$(read_env_var POSTGRES_KEYCLOAK_PASSWORD "$ENV_FILE")
         GRIST_OIDC_CLIENT_SECRET=$(read_env_var GRIST_OIDC_CLIENT_SECRET "$ENV_FILE")
         GRIST_API_KEY=$(read_env_var GRIST_API_KEY "$ENV_FILE")
@@ -493,15 +602,21 @@ generate_secrets() {
         [[ -n "$_grist_po" ]] && GRIST_PERSONAL_ORGS="$_grist_po"
         _grist_oca=$(read_env_var GRIST_ORG_CREATION_ANYONE "$ENV_FILE")
         [[ -n "$_grist_oca" ]] && GRIST_ORG_CREATION_ANYONE="$_grist_oca"
-        if [[ -z "$POSTGRES_KEYCLOAK_PASSWORD" ]]; then
+        if [[ "$KEYCLOAK_MODE" == "new" && -z "$POSTGRES_KEYCLOAK_PASSWORD" ]]; then
             log_error "В $ENV_FILE нет POSTGRES_KEYCLOAK_PASSWORD, а файл существует. Исправьте .env или удалите том БД."
             exit 1
         fi
+        if [[ "$KEYCLOAK_MODE" == "existing" && -z "$KEYCLOAK_ADMIN_PASSWORD" ]]; then
+            log_error "Для mode=existing нужен KEYCLOAK_ADMIN_PASSWORD (CLI или .env)"
+            exit 1
+        fi
+        [[ -z "$GRIST_API_KEY" ]] && GRIST_API_KEY=$(openssl rand -hex 40)
+        [[ -z "$GRIST_OIDC_CLIENT_SECRET" ]] && GRIST_OIDC_CLIENT_SECRET=$(openssl rand -base64 32)
         log_success "Секреты загружены из существующего .env"
         return
     fi
 
-    if [[ "$existing_pg_volume" == true ]] && [[ "$KEEP_DATA" == true ]]; then
+    if [[ "$KEYCLOAK_MODE" == "new" ]] && [[ "$existing_pg_volume" == true ]] && [[ "$KEEP_DATA" == true ]]; then
         log_error "Найден Docker volume с данными PostgreSQL (keycloak-db-data), но нет $ENV_FILE с паролем БД."
         log_error "Keycloak не сможет подключиться: пароль в БД не совпадёт с новым."
         log_info "Варианты: (1) восстановите .env из бэкапа; (2) удалите том и разверните заново:"
@@ -509,8 +624,10 @@ generate_secrets() {
         exit 1
     fi
 
-    KEYCLOAK_ADMIN_PASSWORD=$(openssl rand -base64 32)
-    POSTGRES_KEYCLOAK_PASSWORD=$(openssl rand -base64 32)
+    if [[ "$KEYCLOAK_MODE" == "new" ]]; then
+        [[ -n "$KEYCLOAK_ADMIN_PASSWORD" ]] || KEYCLOAK_ADMIN_PASSWORD=$(openssl rand -base64 32)
+        POSTGRES_KEYCLOAK_PASSWORD=$(openssl rand -base64 32)
+    fi
     GRIST_OIDC_CLIENT_SECRET=$(openssl rand -base64 32)
     GRIST_API_KEY=$(openssl rand -hex 40)
 
@@ -565,10 +682,12 @@ AUTH_DOMAIN=$AUTH_DOMAIN
 GRIST_DOMAIN=$GRIST_DOMAIN
 
 # Keycloak
+KEYCLOAK_MODE=$KEYCLOAK_MODE
+KEYCLOAK_URL=$KEYCLOAK_URL
 KEYCLOAK_REALM=$KEYCLOAK_REALM
 KEYCLOAK_ADMIN_PASSWORD=$KEYCLOAK_ADMIN_PASSWORD
 
-# PostgreSQL
+# PostgreSQL (только mode=new)
 POSTGRES_KEYCLOAK_PASSWORD=$POSTGRES_KEYCLOAK_PASSWORD
 
 # OIDC Client (confidential — только для контейнера Grist, не для мобильного приложения)
@@ -626,9 +745,48 @@ create_docker_compose() {
     log_step "Генерация docker-compose.yml"
 
     local COMPOSE_FILE="$DEPLOY_DIR/docker-compose.yml"
+    local GRIST_OIDC_ISSUER
 
-    # Копируем из template или создаём встроенный
-    cat > "$COMPOSE_FILE" << 'EOF'
+    if [[ "$KEYCLOAK_MODE" == "existing" ]]; then
+        GRIST_OIDC_ISSUER='${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}'
+        cat > "$COMPOSE_FILE" << EOF
+networks:
+  grist-sso-net:
+    driver: bridge
+
+volumes:
+  grist-data:
+
+services:
+  grist:
+    image: gristlabs/grist:\${GRIST_VERSION}
+    container_name: grist-sso-grist
+    restart: unless-stopped
+    environment:
+      APP_HOME_URL: https://\${GRIST_DOMAIN}
+      GRIST_OIDC_SP_HOST: https://\${GRIST_DOMAIN}
+      GRIST_OIDC_IDP_ISSUER: ${GRIST_OIDC_ISSUER}
+      GRIST_OIDC_IDP_SCOPES: openid profile email
+      GRIST_OIDC_IDP_CLIENT_ID: \${GRIST_OIDC_CLIENT_ID}
+      GRIST_OIDC_IDP_CLIENT_SECRET: \${GRIST_OIDC_CLIENT_SECRET}
+      GRIST_FORCE_LOGIN: "\${GRIST_FORCE_LOGIN}"
+      GRIST_ANON_PLAYGROUND: "false"
+      GRIST_DEFAULT_EMAIL: \${GRIST_DEFAULT_EMAIL}
+      GRIST_SINGLE_ORG: "\${GRIST_SINGLE_ORG}"
+      GRIST_PERSONAL_ORGS: "\${GRIST_PERSONAL_ORGS}"
+      GRIST_ORG_CREATION_ANYONE: "\${GRIST_ORG_CREATION_ANYONE}"
+      GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED: "\${GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED}"
+      # Skip interactive /boot first-run wizard when OIDC is preconfigured via env
+      GRIST_IN_SERVICE: "true"
+    volumes:
+      - grist-data:/persist
+    ports:
+      - "127.0.0.1:3000:8484"
+    networks:
+      - grist-sso-net
+EOF
+    else
+        cat > "$COMPOSE_FILE" << 'EOF'
 networks:
   grist-sso-net:
     driver: bridge
@@ -699,6 +857,8 @@ services:
       GRIST_PERSONAL_ORGS: "${GRIST_PERSONAL_ORGS}"
       GRIST_ORG_CREATION_ANYONE: "${GRIST_ORG_CREATION_ANYONE}"
       GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED: "${GRIST_OIDC_SP_IGNORE_EMAIL_VERIFIED}"
+      # Skip interactive /boot first-run wizard when OIDC is preconfigured via env
+      GRIST_IN_SERVICE: "true"
     volumes:
       - grist-data:/persist
     ports:
@@ -708,8 +868,9 @@ services:
     depends_on:
       - keycloak
 EOF
+    fi
 
-    log_success "docker-compose.yml создан"
+    log_success "docker-compose.yml создан (KEYCLOAK_MODE=$KEYCLOAK_MODE)"
 }
 
 ################################################################################
@@ -757,7 +918,31 @@ start_containers() {
         log_verbose "Current directory: $(pwd)"
         log_verbose "Docker compose file: $(pwd)/docker-compose.yml"
         log_verbose "Env file: $(pwd)/.env"
-        log_verbose "Starting containers with --env-file .env flag"
+        log_verbose "KEYCLOAK_MODE: $KEYCLOAK_MODE"
+    fi
+
+    if [[ "$KEYCLOAK_MODE" == "existing" ]]; then
+        log_info "Mode=existing: локальный Keycloak не запускается"
+        log_info "Проверка доступности Keycloak: $KEYCLOAK_URL"
+        local kc_ok=false
+        local attempt
+        for attempt in $(seq 1 30); do
+            if curl -sfL "$KEYCLOAK_URL/realms/master/.well-known/openid-configuration" >/dev/null 2>&1; then
+                kc_ok=true
+                break
+            fi
+            sleep 2
+        done
+        if [[ "$kc_ok" != true ]]; then
+            log_error "Внешний Keycloak недоступен: $KEYCLOAK_URL"
+            exit 1
+        fi
+        log_success "Внешний Keycloak доступен"
+
+        log_info "Запуск Grist..."
+        docker_compose --env-file .env up -d grist
+        log_success "Контейнер Grist запущен"
+        return
     fi
 
     log_info "Запуск PostgreSQL и Keycloak..."
@@ -846,7 +1031,6 @@ setup_keycloak_realm() {
 
     cd "$DEPLOY_DIR"
 
-    # Убедиться что переменные окружения установлены
     export KEYCLOAK_ADMIN_PASSWORD
     export KEYCLOAK_REALM
     export GRIST_DOMAIN
@@ -855,27 +1039,28 @@ setup_keycloak_realm() {
     export EMAIL_PORT
     export EMAIL_USER
     export EMAIL_PASSWORD
-    export KEYCLOAK_URL="http://localhost:8090"
+    export KEYCLOAK_MODE
     export GRIST_OIDC_CLIENT_SECRET_FILE="/tmp/grist-client-secret.txt"
     export GRIST_MOBILE_OIDC_CLIENT_ID
     export GRIST_MOBILE_OIDC_REDIRECT_URI
 
+    if [[ "$KEYCLOAK_MODE" == "existing" ]]; then
+        export KEYCLOAK_URL
+    else
+        export KEYCLOAK_URL="http://localhost:8090"
+    fi
+
     if [[ "$VERBOSE" == true ]]; then
         log_verbose "Setting up Keycloak realm with these environment variables:"
+        log_verbose "  KEYCLOAK_MODE: $KEYCLOAK_MODE"
         log_verbose "  KEYCLOAK_URL: $KEYCLOAK_URL"
         log_verbose "  KEYCLOAK_ADMIN_PASSWORD: ***REDACTED***"
         log_verbose "  AUTH_DOMAIN: $AUTH_DOMAIN"
         log_verbose "  GRIST_DOMAIN: $GRIST_DOMAIN"
-        log_verbose "  EMAIL_HOST: $EMAIL_HOST"
-        log_verbose "  EMAIL_PORT: $EMAIL_PORT"
-        log_verbose "  EMAIL_USER: $EMAIL_USER"
-        log_verbose "  GRIST_OIDC_CLIENT_SECRET_FILE: $GRIST_OIDC_CLIENT_SECRET_FILE"
-        log_verbose "  GRIST_MOBILE_OIDC_CLIENT_ID: $GRIST_MOBILE_OIDC_CLIENT_ID"
-        log_verbose "  GRIST_MOBILE_OIDC_REDIRECT_URI: $GRIST_MOBILE_OIDC_REDIRECT_URI"
         log_verbose "Script location: $SCRIPT_DIR/scripts/keycloak-realm-setup.sh"
     fi
 
-    log_info "Запуск скрипта настройки Keycloak..."
+    log_info "Запуск скрипта настройки Keycloak ($KEYCLOAK_URL)..."
 
     # Запустить keycloak-realm-setup.sh
     if bash "$SCRIPT_DIR/scripts/keycloak-realm-setup.sh"; then
@@ -898,36 +1083,13 @@ setup_keycloak_realm() {
             # Обновить .env файл
             log_info "Обновление .env файла..."
 
-            if [[ "$VERBOSE" == true ]]; then
-                log_verbose "Before update, GRIST_OIDC_CLIENT_SECRET in .env:"
-                grep GRIST_OIDC_CLIENT_SECRET "$DEPLOY_DIR/.env" | head -c 100 | while read line; do
-                    log_verbose "  $line..."
-                done
-            fi
-
-            sed -i "s/^GRIST_OIDC_CLIENT_SECRET=.*/GRIST_OIDC_CLIENT_SECRET=$GRIST_OIDC_CLIENT_SECRET/" "$DEPLOY_DIR/.env"
-
-            if [[ "$VERBOSE" == true ]]; then
-                log_verbose "After update, GRIST_OIDC_CLIENT_SECRET in .env:"
-                grep GRIST_OIDC_CLIENT_SECRET "$DEPLOY_DIR/.env" | head -c 100 | while read line; do
-                    log_verbose "  $line..."
-                done
-            fi
+            sed -i "s|^GRIST_OIDC_CLIENT_SECRET=.*|GRIST_OIDC_CLIENT_SECRET=$GRIST_OIDC_CLIENT_SECRET|" "$DEPLOY_DIR/.env"
 
             # Пересоздать Grist контейнер с новым secret
             log_info "Перезагрузка Grist с новой конфигурацией OIDC..."
 
-            if [[ "$VERBOSE" == true ]]; then
-                log_verbose "Running: docker-compose --env-file .env stop grist && rm -f grist"
-            fi
-
             docker_compose --env-file .env stop grist
             docker_compose --env-file .env rm -f grist
-
-            if [[ "$VERBOSE" == true ]]; then
-                log_verbose "Running: docker-compose --env-file .env up -d grist"
-            fi
-
             docker_compose --env-file .env up -d grist
 
             log_info "Ожидание Grist (максимум 2 минуты)..."
@@ -937,33 +1099,17 @@ setup_keycloak_realm() {
             while [ $attempt -lt $max_attempts ]; do
                 if curl -s http://localhost:3000 > /dev/null 2>&1; then
                     log_success "Grist готов"
-                    if [[ "$VERBOSE" == true ]]; then
-                        log_verbose "Grist is responding after $((attempt * 5)) seconds"
-                    fi
                     break
                 fi
                 attempt=$((attempt + 1))
-                if [[ "$VERBOSE" == true && $((attempt % 2)) == 0 ]]; then
-                    log_verbose "Attempt $attempt/24... checking Grist status"
-                fi
                 echo -ne "\r⏳ Попытка $attempt/$max_attempts..."
                 sleep 5
             done
 
             if [ $attempt -eq $max_attempts ]; then
                 log_warning "Grist может не запуститься сразу, проверьте логи: docker-compose logs grist"
-                if [[ "$VERBOSE" == true ]]; then
-                    log_verbose "Grist startup timeout, showing last 20 lines of logs:"
-                    docker_compose logs grist | tail -20 | while read line; do
-                        log_verbose "  $line"
-                    done
-                fi
             fi
 
-            # Очистить временный файл
-            if [[ "$VERBOSE" == true ]]; then
-                log_verbose "Removing temporary client secret file: $GRIST_OIDC_CLIENT_SECRET_FILE"
-            fi
             rm -f "$GRIST_OIDC_CLIENT_SECRET_FILE"
         else
             log_error "Не удалось получить client secret"
@@ -1025,7 +1171,9 @@ issue_certificate() {
 ensure_ssl_certificates() {
     log_info "Проверка SSL сертификатов..."
 
-    issue_certificate "$AUTH_DOMAIN"
+    if [[ "$KEYCLOAK_MODE" == "new" ]]; then
+        issue_certificate "$AUTH_DOMAIN"
+    fi
     issue_certificate "$GRIST_DOMAIN"
 }
 
@@ -1042,13 +1190,19 @@ run_nginx_setup() {
     systemctl start nginx 2>/dev/null || true
 
     chmod +x "$SCRIPT_DIR/scripts/setup-nginx.sh" 2>/dev/null || true
-    if DEPLOY_DIR="$DEPLOY_DIR" bash "$SCRIPT_DIR/scripts/setup-nginx.sh"; then
-        log_success "nginx настроен: https://$AUTH_DOMAIN и https://$GRIST_DOMAIN"
+    if DEPLOY_DIR="$DEPLOY_DIR" KEYCLOAK_MODE="$KEYCLOAK_MODE" bash "$SCRIPT_DIR/scripts/setup-nginx.sh"; then
+        if [[ "$KEYCLOAK_MODE" == "existing" ]]; then
+            log_success "nginx настроен: https://$GRIST_DOMAIN (Keycloak: $KEYCLOAK_URL)"
+        else
+            log_success "nginx настроен: https://$AUTH_DOMAIN и https://$GRIST_DOMAIN"
+        fi
     else
         log_warning "nginx не настроен. Нужны сертификаты Let's Encrypt:"
-        log_info "  certbot certonly --nginx -d $AUTH_DOMAIN"
+        if [[ "$KEYCLOAK_MODE" == "new" ]]; then
+            log_info "  certbot certonly --nginx -d $AUTH_DOMAIN"
+        fi
         log_info "  certbot certonly --nginx -d $GRIST_DOMAIN"
-        log_info "Затем: sudo DEPLOY_DIR=$DEPLOY_DIR $SCRIPT_DIR/scripts/setup-nginx.sh"
+        log_info "Затем: sudo DEPLOY_DIR=$DEPLOY_DIR KEYCLOAK_MODE=$KEYCLOAK_MODE $SCRIPT_DIR/scripts/setup-nginx.sh"
         return 1
     fi
 }
@@ -1066,13 +1220,19 @@ run_tests() {
     export AUTH_DOMAIN
     export GRIST_DOMAIN
     export KEYCLOAK_REALM
+    export KEYCLOAK_MODE
+    export KEYCLOAK_URL
     export DEPLOY_DIR
 
     if bash "$SCRIPT_DIR/scripts/test-deployment.sh"; then
         log_success "Все тесты пройдены"
     else
         log_warning "Часть тестов не прошла (часто HTTP 404 по HTTPS, пока не настроен nginx перед контейнерами)."
-        log_info "Сервисы в Docker: Keycloak http://127.0.0.1:8090, Grist http://127.0.0.1:3000 — для https://$AUTH_DOMAIN и https://$GRIST_DOMAIN нужен reverse proxy (nginx) и SSL."
+        if [[ "$KEYCLOAK_MODE" == "existing" ]]; then
+            log_info "Сервисы: Grist http://127.0.0.1:3000, Keycloak $KEYCLOAK_URL — для https://$GRIST_DOMAIN нужен reverse proxy (nginx) и SSL."
+        else
+            log_info "Сервисы в Docker: Keycloak http://127.0.0.1:8090, Grist http://127.0.0.1:3000 — для https://$AUTH_DOMAIN и https://$GRIST_DOMAIN нужен reverse proxy (nginx) и SSL."
+        fi
     fi
 }
 
@@ -1110,7 +1270,47 @@ EOF
     fi
 
     # Создать файл с учетными данными
-    cat > "$CREDENTIALS_FILE" << EOF
+    if [[ "$KEYCLOAK_MODE" == "existing" ]]; then
+        cat > "$CREDENTIALS_FILE" << EOF
+================================================================================
+GRIST + SHARED KEYCLOAK DEPLOYMENT CREDENTIALS
+Дата: $(date)
+KEYCLOAK_MODE=existing
+================================================================================
+
+🔐 SHARED KEYCLOAK
+────────────────────────────────────────────────────────────────────────────
+URL: $KEYCLOAK_URL
+Realm: $KEYCLOAK_REALM
+Admin password: (managed on Keycloak host; passed at deploy time)
+
+⚠️  СОХРАНИТЕ ЭТОТ ФАЙЛ В БЕЗОПАСНОМ МЕСТЕ!
+────────────────────────────────────────────────────────────────────────────
+
+📋 OIDC — сервер Grist (confidential client)
+────────────────────────────────────────────────────────────────────────────
+Client ID: grist-client
+Client Secret: $GRIST_OIDC_CLIENT_SECRET
+Issuer: $KEYCLOAK_URL/realms/$KEYCLOAK_REALM
+Redirect URI (Grist web): https://$GRIST_DOMAIN/oauth2/callback
+
+📱 OIDC — нативное приложение (public client + PKCE, без секрета)
+────────────────────────────────────────────────────────────────────────────
+Client ID: $GRIST_MOBILE_OIDC_CLIENT_ID
+Redirect URI: $GRIST_MOBILE_OIDC_REDIRECT_URI
+Issuer: $KEYCLOAK_URL/realms/$KEYCLOAK_REALM
+
+🎯 GRIST ADMIN EMAIL
+────────────────────────────────────────────────────────────────────────────
+Email: $GRIST_ADMIN_EMAIL
+API Key: $GRIST_API_KEY
+
+================================================================================
+IMPORTANT: These credentials are stored in plain text. Keep this file secure!
+================================================================================
+EOF
+    else
+        cat > "$CREDENTIALS_FILE" << EOF
 ================================================================================
 GRIST + KEYCLOAK DEPLOYMENT CREDENTIALS
 Дата: $(date)
@@ -1160,14 +1360,16 @@ From Address: $EMAIL_USER
 IMPORTANT: These credentials are stored in plain text. Keep this file secure!
 ================================================================================
 EOF
+    fi
 
     chmod 600 "$CREDENTIALS_FILE"
     log_success "Учетные данные сохранены в: $CREDENTIALS_FILE"
 
     # Создать файл с информацией о развертывании
     cat > "$OUTPUT_FILE" << EOF
-🎉 GRIST + KEYCLOAK DEVELOPMENT DEPLOYMENT
+🎉 GRIST DEPLOYMENT
 Дата: $(date)
+KEYCLOAK_MODE=$KEYCLOAK_MODE
 
 ================================================================================
 ✅ DEPLOYMENT COMPLETED SUCCESSFULLY
@@ -1175,10 +1377,10 @@ EOF
 
 🌐 AVAILABLE SERVICES
 ────────────────────────────────────────────────────────────────────────────
-Keycloak Admin Panel:
-  URL: https://$AUTH_DOMAIN
-  Username: admin
-  Password: [see deploy-credentials.txt]
+Keycloak:
+  URL: $KEYCLOAK_URL
+$(if [[ "$KEYCLOAK_MODE" == "new" ]]; then echo "  Username: admin
+  Password: [see deploy-credentials.txt]"; else echo "  (shared / external instance)"; fi)
 
 Grist Application:
   URL: https://$GRIST_DOMAIN
@@ -1208,70 +1410,20 @@ grist-client with client secret is only for Grist server container; mobile app u
    Location: $CREDENTIALS_FILE
    Permissions: 600 (root only)
 
-3. IMPORTANT: Store these credentials in a secure location:
-   ✅ Password manager (1Password, Bitwarden, etc.)
-   ✅ Encrypted storage
-   ❌ NOT in Git repository
-   ❌ NOT in plain text files
-   ❌ NOT in email or Slack
-
-4. The .gitignore file protects against accidentally committing secrets
+3. IMPORTANT: Store these credentials in a secure location.
 
 ================================================================================
 📚 NEXT STEPS
 ================================================================================
 
 1. Create users in Keycloak Admin Panel:
-   https://$AUTH_DOMAIN → Realm: $KEYCLOAK_REALM → Users → Create user
+   $KEYCLOAK_URL → Realm: $KEYCLOAK_REALM → Users → Create user
 
-2. Create a test user:
-   Email: test@example.com
-   Password: [set a password]
-   Email Verified: ON
-
-3. Login to Grist:
+2. Login to Grist:
    https://$GRIST_DOMAIN
-   Click "Sign in"
-   Use your Keycloak credentials
-
-4. For mobile app integration:
-   Use the JSON configuration above in GristConfig
 
 ================================================================================
-🆘 TROUBLESHOOTING
-================================================================================
-
-Check the logs:
-  docker-compose logs keycloak
-  docker-compose logs grist
-  tail -f /tmp/grist-keycloak-deploy.log
-
-Run diagnostics:
-  bash $DEPLOY_DIR/scripts/test-deployment.sh
-
-See documentation:
-  $DEPLOY_DIR/docs/TROUBLESHOOTING.md
-  $DEPLOY_DIR/docs/FAQ.md
-
-================================================================================
-💾 BACKUP & RESTORE
-================================================================================
-
-Backup PostgreSQL database:
-  docker exec grist-sso-postgres pg_dump -U keycloak keycloak > keycloak-backup.sql
-
-Backup Grist data:
-  docker run --rm -v grist-sso_grist-data:/data -v \$(pwd):/backup \\
-    alpine tar czf /backup/grist-backup.tar.gz -C /data .
-
-Backup configuration:
-  cp $DEPLOY_DIR/.env backup/.env
-  cp $CREDENTIALS_FILE backup/deploy-credentials.txt
-
-See $DEPLOY_DIR/docs/FAQ.md for restore procedures.
-
-================================================================================
-Generated by Grist + Keycloak Deployment Script v1.0
+Generated by Grist + Keycloak Deployment Script v1.1
 ================================================================================
 EOF
 
@@ -1304,6 +1456,8 @@ main() {
         log_verbose "Parsed arguments:"
         log_verbose "  AUTH_DOMAIN: $AUTH_DOMAIN"
         log_verbose "  GRIST_DOMAIN: $GRIST_DOMAIN"
+        log_verbose "  KEYCLOAK_MODE: $KEYCLOAK_MODE"
+        log_verbose "  KEYCLOAK_URL: $KEYCLOAK_URL"
         log_verbose "  EMAIL_USER: $EMAIL_USER"
         log_verbose "  EMAIL_HOST: $EMAIL_HOST"
         log_verbose "  GRIST_ADMIN_EMAIL: $GRIST_ADMIN_EMAIL"
@@ -1339,7 +1493,11 @@ main() {
     create_docker_compose
 
     if [[ "$RESET_POSTGRES_VOLUME" == true ]]; then
-        reset_keycloak_postgres_volume
+        if [[ "$KEYCLOAK_MODE" != "new" ]]; then
+            log_warning "--reset-postgres-volume игнорируется в mode=existing (локальной БД Keycloak нет)"
+        else
+            reset_keycloak_postgres_volume
+        fi
     fi
 
     # Запуск контейнеров
@@ -1364,7 +1522,7 @@ main() {
     log_info "Детали развертывания: $OUTPUT_FILE"
     log_info ""
     log_info "🌐 Доступные сервисы:"
-    log_info "   Keycloak Admin: https://$AUTH_DOMAIN"
+    log_info "   Keycloak: $KEYCLOAK_URL"
     log_info "   Grist App: https://$GRIST_DOMAIN"
 }
 
@@ -1385,7 +1543,9 @@ rollback_deployment() {
     else
         log_warning "$DEPLOY_DIR/docker-compose.yml не найден, удаляю контейнеры по именам"
     fi
-    docker rm -f grist-sso-grist grist-sso-keycloak grist-sso-postgres 2>/dev/null || true
+    docker rm -f grist-sso-grist 2>/dev/null || true
+    # Локальный Keycloak мог остаться от прошлой установки mode=new
+    docker rm -f grist-sso-keycloak grist-sso-postgres 2>/dev/null || true
 
     # Удаление Nginx конфигов
     log_info "Удаление Nginx конфигов..."
@@ -1403,13 +1563,17 @@ rollback_deployment() {
 
     # Удаление volumes если указано
     if [[ "$KEEP_DATA" == false ]]; then
-        log_warning "Удаление всех данных БД и файлов Grist..."
+        log_warning "Удаление данных Grist (и локального Keycloak DB, если были)..."
         docker volume rm grist-sso_keycloak-db-data grist-sso_grist-data 2>/dev/null || true
         docker volume rm keycloak-db-data grist-data 2>/dev/null || true
+        # project-prefixed leftovers
+        for vol in $(docker volume ls -q 2>/dev/null | grep -E 'grist-data|keycloak-db-data' || true); do
+            docker volume rm "$vol" 2>/dev/null || true
+        done
         rm -rf "$DEPLOY_DIR" 2>/dev/null || true
         log_warning "⚠️  НЕВОЗМОЖНО ВОССТАНОВИТЬ"
     else
-        log_info "БД и данные Grist сохранены"
+        log_info "Данные Grist / локальной БД сохранены"
     fi
 
     log_success "Откатывание завершено"
